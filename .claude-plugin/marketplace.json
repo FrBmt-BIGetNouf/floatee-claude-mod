@@ -1,0 +1,14 @@
+{
+  "name": "floatee",
+  "description": "The Floatee mod for Claude Code: your backlog above the prompt",
+  "owner": {
+    "name": "Bleh",
+    "url": "https://floatee.me"
+  },
+  "plugins": [
+    {
+      "name": "floatee",
+      "source": "./"
+    }
+  ]
+}
