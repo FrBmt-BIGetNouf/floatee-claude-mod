@@ -24,7 +24,7 @@
 // CLI). The token stays in this module: never in $.state, a log, a toast or a
 // prompt. Every request carries `create=0` — the mod never creates a project.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderChildren } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, RenderNode } from 'claude-code'
 
 import type { Box, Item } from '../types'
 import { firstLine, reasonOf, replyOf } from './replies'
@@ -530,6 +530,30 @@ async function track($: EngineInterface, command: string, output: string) {
 	// system prompt follows the ticket.
 	await refresh($).catch(() => undefined)
 	await loadTicket($)
+}
+
+// #688: the band stacks with other mods'. What the hooks after ours draw
+// (`next(e)`) sits above the list, so the band reads the same whichever mod
+// loads first, and shares its rows. The engine's own band is an empty Box.
+function isBlank(node: RenderNode): boolean {
+	if (typeof node === 'string') return node.trim() === ''
+	if (node.type !== 'Box' && node.type !== 'Text') return false
+	return (node.children ?? []).every(isBlank)
+}
+
+// Rows a tree takes, roughly: a column adds its children up, a row takes its
+// tallest, a Text its lines; borders, paddings and margins add theirs.
+function rowsOf(node: RenderNode): number {
+	if (typeof node === 'string') return node.split('\n').length
+	const props = ('props' in node ? node.props : undefined) as Record<string, unknown> | undefined
+	const children = 'children' in node && Array.isArray(node.children) ? node.children as RenderNode[] : []
+	if (node.type === 'Text') return children.filter(c => typeof c === 'string').join('').split('\n').length
+	if (node.type !== 'Box') return 1
+	const own = children.map(rowsOf)
+	const body = props?.flexDirection === 'column' ? own.reduce((a, b) => a + b, 0) : Math.max(0, ...own)
+	const n = (k: string) => (typeof props?.[k] === 'number' ? props[k] as number : 0)
+	const edges = (k: string) => (n(`${k}Top`) || n(`${k}Y`) || n(k)) + (n(`${k}Bottom`) || n(`${k}Y`) || n(k))
+	return body + edges('padding') + edges('margin') + (props?.borderStyle ? 2 : 0)
 }
 
 type Site = { isPane: boolean; busy: boolean; maxRows: number; bodyColumns: number }
@@ -1053,7 +1077,13 @@ export const register: Register = on => {
 		// The pane shows the list: the band leaves the engine its place. A pane
 		// still waiting for room (opened unasked below 144 columns) leaves the band.
 		if (await read($, layout) === 'pane' && (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)) return next(e)
-		return (await draw($, e, { isPane: false, busy: e.props.isWorking, maxRows: e.props.maxRows, bodyColumns: e.props.bodyColumns })) ?? next(e)
+		const below = await next(e)
+		const others = isBlank(below) ? null : below
+		const maxRows = Math.max(0, e.props.maxRows - (others ? rowsOf(others) : 0))
+		const tree = await draw($, e, { isPane: false, busy: e.props.isWorking, maxRows, bodyColumns: e.props.bodyColumns })
+		if (!tree || !others) return tree ?? below
+		const { Box } = $.ui.resolve(e)
+		return <Box flexDirection="column">{others}{tree}</Box>
 	})
 
 	on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

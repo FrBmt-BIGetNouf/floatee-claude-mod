@@ -13,6 +13,8 @@ const PROPS = { hasSurvey: false, isWorking: false, maxRows: 14, bodyColumns: 10
 
 // The API: the list, item #12 (its body as `body` says), PATCHes recorded.
 function repo(on: On) {
+  // The engine's own band, beneath ours (#688): empty.
+  on('ui.render', ($t, e) => { const { Box } = $t.ui.resolve(e); return <Box /> })
 	const api = { body: BODY, patches: [] as string[], toasts: [] as string[], itemReads: 0 }
 	on('session.start', (_$, e) => ({ cwd: e.cwd }))
 	on('session.cwd', () => ({ value: '/repo' }))

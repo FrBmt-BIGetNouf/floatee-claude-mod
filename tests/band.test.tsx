@@ -15,6 +15,8 @@ const PROPS = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 10
 
 // A repo with a .floatee, the API answering `rows()`; returns what was posted/ran/toasted.
 function repo(on: On, rows: () => unknown[]) {
+  // The engine's own band, beneath ours (#688): empty.
+  on('ui.render', ($t, e) => { const { Box } = $t.ui.resolve(e); return <Box /> })
   const posts: unknown[] = []
   const ran: string[] = []
   const toasts: string[] = []

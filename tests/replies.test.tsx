@@ -9,6 +9,8 @@ const said = (authorType: string, authorName: string, createdAt: number) => ({ k
 
 // #17 blocked, its activity as `api.activity` says; the list counts its comments.
 function repo(on: On) {
+  // The engine's own band, beneath ours (#688): empty.
+  on('ui.render', ($t, e) => { const { Box } = $t.ui.resolve(e); return <Box /> })
 	const api = { activity: [BLOCK] as unknown[], reads: 0, toasts: [] as string[], ran: [] as string[] }
 	on('session.start', (_$, e) => ({ cwd: e.cwd }))
 	on('session.cwd', () => ({ value: '/repo' }))

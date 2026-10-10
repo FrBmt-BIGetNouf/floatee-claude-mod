@@ -9,6 +9,8 @@ const PROPS = { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 12
 
 // A repo whose API answers `reply(url)`; returns the URLs asked and the store.
 function repo(on: On, reply = (_url: string) => ({ status: 200, text: JSON.stringify(ITEMS), headers: {} as Record<string, string> })) {
+  // The engine's own band, beneath ours (#688): empty.
+  on('ui.render', ($t, e) => { const { Box } = $t.ui.resolve(e); return <Box /> })
   const urls: string[] = []
   const store: Record<string, unknown> = {}
   on('session.start', (_$, e) => ({ cwd: e.cwd }))

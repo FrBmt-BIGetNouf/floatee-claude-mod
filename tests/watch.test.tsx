@@ -8,6 +8,8 @@ const PROPS = { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 10
 
 // A queue of pending todos (`api.queue`); `claim` hands out the first.
 function repo(on: On, extra = '') {
+  // The engine's own band, beneath ours (#688): empty.
+  on('ui.render', ($t, e) => { const { Box } = $t.ui.resolve(e); return <Box /> })
 	const api = { queue: [15, 18] as number[], ran: [] as string[], toasts: [] as string[] }
 	on('session.start', (_$, e) => ({ cwd: e.cwd }))
 	on('session.cwd', () => ({ value: '/repo' }))
