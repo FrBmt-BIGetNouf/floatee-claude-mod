@@ -10,16 +10,19 @@ Your [Floatee](https://floatee.me) backlog above Claude Code's prompt, in the te
 
 ## Install
 
-In Claude Code:
-
-```
-/plugin marketplace add FrBmt-BIGetNouf/floatee-claude-mod
-/plugin install floatee@floatee
+```sh
+claude plugin marketplace add FrBmt-BIGetNouf/floatee-claude-mod && claude plugin install floatee@floatee
 ```
 
-Claude Code keeps it up to date. You can also download it from Floatee
-(Settings → Your agent) and unzip it into `~/.claude/skills/`: one way or the other,
-not both, or it shows twice.
+To move to a newer version, refresh the catalogue and update, then restart
+Claude Code:
+
+```sh
+claude plugin marketplace update floatee && claude plugin update floatee@floatee
+```
+
+You can also download it from Floatee (Settings → Your agent) and unzip it into
+`~/.claude/skills/`: one way or the other, not both, or it shows twice.
 
 ## Requirements
 
