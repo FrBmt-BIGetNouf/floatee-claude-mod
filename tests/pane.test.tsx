@@ -80,7 +80,7 @@ test('the pane says more: tags and counts per row, the blocked apart with why, i
   const pane = await $.ui.mount({ plugin: 'floatee', surface: 'terminal', component: 'Pane', requestId: 'floatee', props: PANE })
   const all = await text(pane)
   expect(all).toContain('+web')
-  expect(all).toContain('1/3 done')
+  expect(all).toContain('✓ 1/3')
   expect(all).toContain('2 comments')
   expect(all).toContain('⊝ Blocked (1)')
   expect(all).toContain('why: Need the API key to go on')
@@ -90,4 +90,20 @@ test('the pane says more: tags and counts per row, the blocked apart with why, i
   await pane.press({ key: 'fold-ideas' })
   expect(await text(pane)).toContain('An idea')
   expect(await text(pane)).not.toContain('A note')
+})
+
+// #694: in the pane, a row reads as a title line (cut), a tags line, a facts line.
+test('pane rows are compact: one cut line each for the title, the tags and the facts', async ($, on) => {
+  const long = 'A very long title that would wrap over several lines in a narrow pane'
+  const rows = [{ id: 15, title: long, status: 'pending', type: 'todo', sortOrder: 1, tags: ['web', 'csv'], checklist: { done: 1, total: 3 }, commentCount: 2, updatedAt: 1_000 }]
+  repo(on, { layout: 'pane' }, true, () => rows)
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  const pane = await $.ui.mount({ plugin: 'floatee', surface: 'terminal', component: 'Pane', requestId: 'floatee', props: PANE })
+  const all = await pane.findAll({})
+  expect(all.find(el => el.text === long)?.props.wrap).toBe('truncate-end')
+  // One line: the tags on the left, cut; the facts on the right, in order.
+  const tags = all.filter(el => el.text === '+web +csv')
+  expect(tags.at(-1)?.props.wrap).toBe('truncate-end')
+  expect(all.some(el => el.text === '✓ 1/3 · 2 comments')).toBe(true)
+  expect(all.some(el => el.text?.startsWith('+web +csv✓ 1/3 · 2 comments'))).toBe(true)
 })

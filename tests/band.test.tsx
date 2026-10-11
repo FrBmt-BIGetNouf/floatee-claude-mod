@@ -285,3 +285,15 @@ test('▷ Guided runs the ticket through /todo-guided, greyed while another is q
   expect(await ui.find({ key: 'guided-18' })).toBeUndefined()
   expect((await ui.findAll({})).map(el => el.text).join('\n')).toContain('[ ▷ Guided ]')
 })
+
+// #692: Floatee's yellow, not the theme's orange `warning`; deeper on a light theme.
+for (const [theme, color] of [['dark', 'rgb(252,229,136)'], ['light', 'rgb(154,114,0)'], ['light-daltonized', 'rgb(154,114,0)']] as const) {
+  test(`the brand draws in Floatee's yellow (${theme} theme)`, async ($, on) => {
+    repo(on, () => ITEMS)
+    on('config.list', () => ({ value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: theme, provider: { kind: 'engine' }, isLocked: false }] }))
+    await $.session.start({ cwd: '/repo/sub', surface: 'terminal', isInteractive: true })
+    const ui = await $.ui.mount({ plugin: 'floatee', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+    const title = (await ui.findAll({})).find(el => el.text === '⨳ Floatee')
+    expect(title?.props.color).toBe(color)
+  })
+}

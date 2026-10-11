@@ -77,6 +77,18 @@ const pausedUntil = atom({ plugin: 'floatee', key: 'pausedUntil' } as const, 0)
 // Inert launchers. The theme's `inactive` draws close to plain text on some
 // terminals; a fixed mid grey reads as disabled on dark and light alike.
 const GREY = '#6c6c6c'
+// #692: Floatee's yellow, not the theme's `warning` (orange): the app's dark
+// primary (duck, #FCE588) on a dark background; on a light one it washes out,
+// a deeper gold stands in. Spelled rgb(), as a theme spells its colors: a hex
+// came out as a duller yellow in some terminals.
+const HONEY = 'rgb(252,229,136)'
+const GOLD = 'rgb(154,114,0)'
+let brand = HONEY
+async function readBrand($: EngineInterface) {
+	const rows = await $.config.list().catch(() => [])
+	const theme = rows.find(row => row.key === 'theme')?.value
+	brand = typeof theme === 'string' && theme.startsWith('light') ? GOLD : HONEY
+}
 const SHOWN = 6            // rows drawn before "+N more"
 const BOXES = 5            // checklist lines drawn before "+N more"
 const NARROW = 100         // band columns below which labels shrink to glyphs (#669)
@@ -649,8 +661,8 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 	const isTerminal = e.surface === 'terminal'
 	const glyph = (g: string) => isTerminal ? `[${g}]` : g
 	const greyed = (label: string) => isTerminal ? `[ ${label} ]` : label
-	// The orange frame, the band's look, in the pane too (inside the engine's).
-	const frame = { borderStyle: 'round' as const, borderColor: 'warning', paddingX: 1 }
+	// The yellow frame, the band's look, in the pane too (inside the engine's).
+	const frame = { borderStyle: 'round' as const, borderColor: brand, paddingX: 1 }
 	const cap = site.isPane ? Infinity : SHOWN
 
 	// Header. The first line: title + counts (+ the ticket in progress when
@@ -666,7 +678,7 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 				    ticket in progress gives way, truncated, down to nothing. */}
 				<Box gap={1} flexShrink={1} overflow="hidden">
 					<Box gap={1} flexShrink={0}>
-						<Text color="warning" bold>⨳ Floatee</Text>
+						<Text color={brand} bold>⨳ Floatee</Text>
 						{problem
 							? <Text color="error">{problem}</Text>
 							: <Text dimColor>{`${list.length === 0 ? 'nothing open' : `${list.length} open`}${mineOnly ? ' · mine' : ''}`}</Text>}
@@ -729,7 +741,7 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 			<Box flexDirection="column" {...frame} gap={1}>
 				<Box justifyContent="space-between" gap={1}>
 					<Box gap={1} flexShrink={1} overflow="hidden">
-						<Text color="warning" bold>⨳ Floatee</Text>
+						<Text color={brand} bold>⨳ Floatee</Text>
 						<Text dimColor wrap="truncate-end">{`new ticket in ${slug}`}</Text>
 					</Box>
 					<Box gap={1} flexShrink={0}>
@@ -762,12 +774,15 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 	const hasToggle = !site.isPane && (card?.boxes.length ?? 0) > BOXES
 	const view = card ? site.isPane ? visible(card.boxes, card.boxes.length, true) : visible(card.boxes, isOpen ? Math.max(BOXES, room - 3) : BOXES, isOpen) : null
 	const extra = view ? 1 + view.shown.length + (hasToggle || view.more + view.checked > 0 ? 1 : 0) : 0
-	const fits = extra > 0 && room - extra >= 1
+	// #693: the session's ticket leads, apart from the queue: a section of
+	// its own in the pane, the first row of the band. Always drawn; the
+	// others share what rows are left.
+	const ours = problem || mine === null || room < 1 ? null : list.find(i => i.id === mine) ?? null
+	const spare = room - (ours ? 1 : 0)
+	const showCard = ours !== null && extra > 0 && spare - extra >= 0
 	// #679: the pane lists the blocked todos in a section of their own.
-	const queue = site.isPane ? list.filter(i => i.status !== 'blocked') : list
-	let rows = problem ? [] : queue.slice(0, Math.min(cap, fits ? room - extra : room))
-	const showCard = fits && rows.some(i => i.id === mine)
-	if (fits && !showCard) rows = queue.slice(0, Math.min(cap, room))
+	const queue = list.filter(i => i !== ours && (!site.isPane || i.status !== 'blocked'))
+	const rows = problem ? [] : queue.slice(0, Math.max(0, Math.min(cap - (ours ? 1 : 0), showCard ? spare - extra : spare)))
 	const more = problem ? 0 : queue.length - rows.length
 	const known = site.isPane ? await read($, detail) : null
 	const told = known && known.id === mine ? known : null
@@ -808,21 +823,22 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 	}
 
 	// #679: under a row in the pane, what the band has no room for: tags, the
-	// checklist's progress, the last change, the comments.
+	// checklist's progress, the comments, the last change. #694: one line,
+	// the tags on the left (cut at the edge), the facts flush right, always
+	// in that order: `✓ 4/5 · 2 comments · 1d 3h ago`.
 	const metaOf = (item: Item) => {
-		// Plain words: a terminal font may lack ☑ or 💬. (`?? ` for the items a
-		// load before #679 left in the state.)
+		// (`?? ` for the items a load before #679 left in the state.)
 		const tags = item.tags ?? []
 		const facts = [
-			item.boxes && `${item.boxes.done}/${item.boxes.total} done`,
-			item.updatedAt && ticked && `${elapsed(ticked - item.updatedAt)} ago`.replace('just now ago', 'just now'),
+			item.boxes && `✓ ${item.boxes.done}/${item.boxes.total}`,
 			(item.comments ?? 0) > 0 && `${item.comments} comment${item.comments === 1 ? '' : 's'}`,
+			item.updatedAt && ticked && `${elapsed(ticked - item.updatedAt)} ago`.replace('just now ago', 'just now'),
 		].filter(Boolean) as string[]
 		if (!tags.length && !facts.length) return null
 		return (
-			<Box key={`meta-${item.id}`} gap={1} flexWrap="wrap">
-				{tags.map(t => <Text key={`tag-${item.id}-${t}`} color="suggestion">{`+${t}`}</Text>)}
-				{facts.length > 0 && <Text dimColor>{facts.join(' · ')}</Text>}
+			<Box key={`meta-${item.id}`} justifyContent="space-between" gap={2}>
+				<Text color="suggestion" wrap="truncate-end">{tags.map(t => `+${t}`).join(' ')}</Text>
+				{facts.length > 0 && <Box flexShrink={0}><Text dimColor>{facts.join(' · ')}</Text></Box>}
 			</Box>
 		)
 	}
@@ -834,49 +850,35 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 	// Each section opens on a dim rule across the pane, then its name: the
 	// todos, the blocked, the ideas and the notes read apart.
 	const rule = '─'.repeat(Math.max(10, site.bodyColumns - 4))
-	const sectionHead = (name: string, label: string, count: number, color: string, canFold: boolean) => (
+	const sectionHead = (name: string, label: string, count: number | null, color: string, canFold: boolean) => (
 		<Box key={`section-${name}`} flexDirection="column" marginTop={1}>
 			<Text dimColor wrap="truncate-end">{rule}</Text>
 			{canFold
 				? <Button key={`fold-${name}`} label={`${isFolded(name) ? '▸' : '▾'} ${label} (${count})`} plain onPress={() => update($, folds, f => ({ ...f, [name]: !(f[name] ?? true) }))} />
-				: <Text color={color} bold>{`${label} (${count})`}</Text>}
+				: <Text color={color} bold>{count === null ? label : `${label} (${count})`}</Text>}
 		</Box>
 	)
 
 	// One todo's row (its checklist under it when ours); `of` is its section,
-	// for the arrows. In the pane, `under` (the facts, why it is blocked)
-	// goes in the title's own column: aligned with it whatever the id's width
-	// or the surface's font.
+	// for the arrows. In the pane, `under` (why it is blocked) follows the facts.
 	const rowOf = (item: Item, i: number, of: Item[], under: RenderChildren[] = []) => {
 		// Ours is in progress even before a refresh has seen the claim.
 		const isCurrent = item.status === 'in_progress' || item.id === mine
 		const isBlocked = item.status === 'blocked'
 		const hasReply = replyIds.includes(item.id)
 		const isSent = sent === item.id
-		const row = (
-			<Box key={`row-${item.id}`} justifyContent="space-between" gap={2}>
-				<Box gap={1} flexShrink={1} overflow="hidden">
-					{/* The id never wraps: only the title gives way. */}
-					<Box flexShrink={0}>
-						{idOf(item, isCurrent ? 'success' : 'warning', isCurrent)}
-					</Box>
-					{site.isPane
-						? (
-							<Box flexDirection="column" flexShrink={1}>
-								<Text wrap="wrap" bold={isCurrent} dimColor={isBlocked && !hasReply}>{item.title}</Text>
-								{metaOf(item)}
-								{under}
-							</Box>
-						)
-						: <Text wrap="truncate-end" bold={isCurrent} dimColor={isBlocked && !hasReply}>{item.title}</Text>}
-				</Box>
+		const actions = (
 				<Box gap={1} flexShrink={0}>
 					{/* State: its icon (⊛ in progress, ⊝ blocked, ⊙ queued) + its name;
 					    blank for a plain pending todo. Padded so the actions after it
 					    line up from row to row. */}
-					<Text color={isCurrent ? 'success' : isBlocked || isSent ? 'warning' : undefined} dimColor={!isCurrent && !isBlocked && !isSent}>
-						{(isSent ? '⊙ queued' : isCurrent ? '⊛ in progress' : hasReply ? '✉ replied' : isBlocked ? '⊝ blocked' : '').padEnd(13)}
-					</Text>
+					{/* #693: in the pane, ours sits under its own "In progress" head:
+					    no state to repeat, its title keeps the room. */}
+					{!(site.isPane && item.id === mine) && (
+						<Text color={isCurrent ? 'success' : isBlocked || isSent ? 'warning' : undefined} dimColor={!isCurrent && !isBlocked && !isSent}>
+							{(isSent ? '⊙ queued' : isCurrent ? '⊛ in progress' : hasReply ? '✉ replied' : isBlocked ? '⊝ blocked' : '').padEnd(13)}
+						</Text>
+					)}
 					{/* Both arrow slots are always there (a blank stands in for a
 					    missing one) so the arrows line up from row to row. */}
 					{/* (Hidden with Mine on: a reorder needs the project's whole order.) */}
@@ -899,15 +901,41 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 					    put it back in the queue (after a Stop, say). */}
 					{item.id === mine && (
 						<Box gap={1}>
-							<Text> </Text>
-							<Text> </Text>
+							{!site.isPane && <Text> </Text>}
+							{!site.isPane && <Text> </Text>}
 							<Button key={`release-${item.id}`} label={label('↩ Release', '↩')} dimColor={busy} onPress={() => busy ? $.ui.toast('Claude is busy: try again when the turn ends') : release($, 'band', true)} />
 							{closeButton(item.id, narrow)}
 						</Box>
 					)}
 				</Box>
-			</Box>
 		)
+		const title = <Text wrap={site.isPane && item.id === mine ? 'wrap' : 'truncate-end'} bold={isCurrent} dimColor={isBlocked && !hasReply}>{item.title}</Text>
+		// #694: in the pane, a ticket reads in full-width lines: its id and its
+		// actions, its title (ours in full, the others cut), its tags, its facts.
+		const row = site.isPane
+			? (
+				<Box key={`row-${item.id}`} flexDirection="column">
+					<Box justifyContent="space-between" gap={2}>
+						<Box flexShrink={0}>{idOf(item, isCurrent ? 'success' : brand, isCurrent)}</Box>
+						{actions}
+					</Box>
+					{title}
+					{metaOf(item)}
+					{under}
+				</Box>
+			)
+			: (
+				<Box key={`row-${item.id}`} justifyContent="space-between" gap={2}>
+					<Box gap={1} flexShrink={1} overflow="hidden">
+						{/* The id never wraps: only the title gives way. */}
+						<Box flexShrink={0}>
+							{idOf(item, isCurrent ? 'success' : brand, isCurrent)}
+						</Box>
+						{title}
+					</Box>
+					{actions}
+				</Box>
+			)
 		if (!(showCard && card && item.id === mine)) return row
 		return <Box key={`mine-${item.id}`} flexDirection="column">{row}{checklistView(card)}</Box>
 	}
@@ -916,10 +944,12 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 	return (
 		<Box flexDirection="column" {...frame}>
 			{header}
-			{site.isPane && !problem && sectionHead('todos', 'Todos', rows.length, 'warning', false)}
+			{site.isPane && ours && sectionHead('current', '⊛ In progress', null, 'success', false)}
+			{ours && rowOf(ours, 0, [ours])}
+			{site.isPane && !problem && sectionHead('todos', 'Todos', rows.length, brand, false)}
 			{/* The pane has room: a blank line between tickets, for the eye. */}
 			<Box flexDirection="column" gap={site.isPane ? 1 : 0}>
-				{rows.map((item, i) => rowOf(item, i, site.isPane ? rows : list))}
+				{rows.map((item, i) => rowOf(item, i, site.isPane ? rows : queue))}
 			</Box>
 			{more > 0 && <Text dimColor>{`+${more} more`}</Text>}
 			{site.isPane && blockedRows.length > 0 && sectionHead('blocked', '⊝ Blocked', blockedRows.length, 'warning', false)}
@@ -930,7 +960,7 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 						return (
 							<Box key={`blocked-${item.id}`} flexDirection="column">
 								{rowOf(item, i, blockedRows, [
-									w?.why && <Text key={`why-${item.id}`} color="warning" wrap="wrap">{`why: ${w.why}`}</Text>,
+									w?.why && <Text key={`why-${item.id}`} color="warning" wrap="truncate-end">{`why: ${w.why}`}</Text>,
 									w?.reply && <Text key={`reply-${item.id}`} color="success">{`✉ ${w.reply.by} replied`}</Text>,
 								])}
 							</Box>
@@ -944,16 +974,14 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 				const name = type === 'idea' ? 'ideas' : 'notes'
 				return (
 					<Box key={`list-${name}`} flexDirection="column">
-						{sectionHead(name, type === 'idea' ? 'Ideas' : 'Notes', of.length, 'warning', true)}
+						{sectionHead(name, type === 'idea' ? 'Ideas' : 'Notes', of.length, brand, true)}
 						{!isFolded(name) && (
 							<Box flexDirection="column" gap={1}>
 								{of.map(item => (
-									<Box key={`other-${item.id}`} gap={1}>
-										<Box flexShrink={0}>{idOf(item, 'warning')}</Box>
-										<Box flexDirection="column" flexShrink={1}>
-											<Text wrap="wrap">{item.title}</Text>
-											{metaOf(item)}
-										</Box>
+									<Box key={`other-${item.id}`} flexDirection="column">
+										<Box>{idOf(item, brand)}</Box>
+										<Text wrap="truncate-end">{item.title}</Text>
+										{metaOf(item)}
 									</Box>
 								))}
 							</Box>
@@ -975,6 +1003,7 @@ export const register: Register = on => {
 		await update($, turnId, () => null)
 		await update($, launched, () => null)
 		config = await findConfig($)
+		await readBrand($)
 		if (config) await checkKit($)
 		await update($, project, () => config?.project ?? null)
 		// #679: the layout last chosen. Opened unasked, the pane waits for 144
@@ -993,6 +1022,14 @@ export const register: Register = on => {
 			})
 		}
 		return next(e)
+	})
+
+	// #692: a theme switched mid-session recolors the band (a write redraws it).
+	on('config.set', { key: 'theme' }, async ($, e, next) => {
+		const result = await next(e)
+		await readBrand($)
+		await update($, folds, f => ({ ...f }))
+		return result
 	})
 
 	// Leaving (exit, /clear, resume) with a ticket still open: back to the queue.

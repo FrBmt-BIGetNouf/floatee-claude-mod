@@ -49,7 +49,8 @@ test('boxes: task lines only, code blocks skipped; toggle flips one and keeps th
 	expect(flipped).toBe(BODY.replace('- [ ] fix the *drag*', '- [x] fix the *drag*'))
 	expect(toggle(flipped!, b[1]!)).toBeNull() // drawn unchecked, now checked: stale
 	expect(elapsed(30_000)).toBe('just now')
-	expect(elapsed(65 * 60_000)).toBe('1 h 05')
+	expect(elapsed(65 * 60_000)).toBe('1h 5m')
+	expect(elapsed((27 * 60 + 4) * 60_000)).toBe('1d 3h')
 })
 
 test('the session\'s ticket shows its checklist and claim time under its row; a press ticks the body', async ($, on) => {
@@ -62,7 +63,7 @@ test('the session\'s ticket shows its checklist and claim time under its row; a 
 	// Folded: the checklist folds with the band.
 	expect(await ui.find({ key: 'box-12-3' })).toBeUndefined()
 	await ui.press({ key: 'fold' })
-	expect(await text(ui)).toContain('1/3 done · claimed 12 min ago')
+	expect(await text(ui)).toContain('1/3 done · claimed 12m ago')
 	expect(await text(ui)).toContain('☐ fix the *drag*')
 	expect(await text(ui)).not.toContain('not a box')
 
@@ -73,7 +74,7 @@ test('the session\'s ticket shows its checklist and claim time under its row; a 
 	// The time moves on with the refreshes.
 	await clock.advance(3 * 60_000)
 	await ui.press({ key: 'refresh' })
-	expect(await text(ui)).toContain('claimed 15 min ago')
+	expect(await text(ui)).toContain('claimed 15m ago')
 })
 
 test('a box changed meanwhile is not overwritten', async ($, on) => {
@@ -136,4 +137,43 @@ test('▾ all opens the whole checklist in the band, ▴ less folds it back', as
 	expect(await text(ui)).not.toContain('checked')
 	await ui.press({ key: 'checklist-toggle-12' })
 	expect(await ui.find({ key: 'box-12-2' })).toBeUndefined()
+})
+
+// #693: the session's ticket leads, apart from the queue: its own section
+// above Todos in the pane, the first row of the band; gone once released.
+test('the ticket in progress leads in a section of its own, out of the Todos', async ($, on) => {
+	const many = [
+		{ id: 15, title: 'Other', status: 'pending', type: 'todo', sortOrder: 1 },
+		{ id: 16, title: 'Third', status: 'pending', type: 'todo', sortOrder: 2 },
+		{ id: 12, title: 'Fix the slider', status: 'in_progress', type: 'todo', sortOrder: 3 },
+	]
+	LIST.splice(0, LIST.length, ...many)
+	try {
+		repo(on)
+		await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+		const band = await $.ui.mount({ plugin: 'floatee', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+		await band.press({ key: 'fold' })
+		// Nothing of ours yet: no section, #12 in the list where it sits.
+		let t = await text(band)
+		expect(t.indexOf('Other')).toBeLessThan(t.indexOf('Fix the slider'))
+
+		await $.tool.call({ tool: 'Bash', command: 'node floatee.mjs start 12' })
+		t = await text(band)
+		expect(t.indexOf('Fix the slider')).toBeLessThan(t.indexOf('Other'))
+		expect(await band.findAll({ key: 'row-12' })).toHaveLength(1)
+
+		const pane = await $.ui.mount({ plugin: 'floatee', surface: 'terminal', component: 'Pane', requestId: 'floatee', props: { title: 'Floatee', isFocused: false, bodyColumns: 60, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 40 }, view: {} } })
+		t = await text(pane)
+		expect(t).toContain('⊛ In progress')
+		expect(t).toContain('Todos (2)')
+		expect(t.indexOf('⊛ In progress')).toBeLessThan(t.indexOf('Fix the slider'))
+		expect(t.indexOf('Fix the slider')).toBeLessThan(t.indexOf('Todos (2)'))
+		expect(await pane.findAll({ key: 'row-12' })).toHaveLength(1)
+		// The head says it: no "in progress" beside the title in the pane.
+		expect((await pane.find({ key: 'row-12' }))?.text).not.toContain('⊛ in progress')
+	} finally {
+		LIST.splice(0, LIST.length,
+			{ id: 12, title: 'Fix the slider', status: 'in_progress', type: 'todo', sortOrder: 1 },
+			{ id: 15, title: 'Other', status: 'pending', type: 'todo', sortOrder: 2 })
+	}
 })

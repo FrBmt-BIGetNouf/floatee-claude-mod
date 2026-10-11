@@ -50,7 +50,7 @@ export function claimedAt(activity: Activity[] | undefined): number | null {
 export function elapsed(ms: number): string {
 	const min = Math.max(0, Math.floor(ms / 60_000))
 	if (min < 1) return 'just now'
-	if (min < 60) return `${min} min`
+	if (min < 60) return `${min}m`
 	const h = Math.floor(min / 60)
-	return h < 24 ? `${h} h ${String(min % 60).padStart(2, '0')}` : `${Math.floor(h / 24)} d ${h % 24} h`
+	return h < 24 ? `${h}h ${min % 60}m` : `${Math.floor(h / 24)}d ${h % 24}h`
 }
