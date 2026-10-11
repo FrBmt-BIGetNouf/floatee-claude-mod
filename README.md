@@ -38,15 +38,9 @@ not both, or it shows twice.
 
 More in the [docs](https://floatee.me/docs#claude-code).
 
-## Development
+## Feedback
 
-This repository is published from the Floatee app's repository
-(`public/agent-kit/claude-mod/`); changes go there. Check with:
-
-```
-claude plugin validate .
-claude plugin test .
-```
+A bug or an idea? Open an [issue](https://github.com/FrBmt-BIGetNouf/floatee-claude-mod/issues).
 
 ## License
 
