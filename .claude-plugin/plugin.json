@@ -1,6 +1,6 @@
 {
   "name": "floatee",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Your Floatee backlog inside Claude Code: the open todos above the prompt (or in a side pane), one button to process each, and guards that keep your API token out of the conversation",
   "author": { "name": "Bleh", "url": "https://floatee.me" },
   "homepage": "https://floatee.me/docs#claude-code",

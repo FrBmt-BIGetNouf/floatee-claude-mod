@@ -15,7 +15,7 @@ const PROPS = { hasSurvey: false, isWorking: false, maxRows: 14, bodyColumns: 10
 function repo(on: On) {
   // The engine's own band, beneath ours (#688): empty.
   on('ui.render', ($t, e) => { const { Box } = $t.ui.resolve(e); return <Box /> })
-	const api = { body: BODY, patches: [] as string[], toasts: [] as string[], itemReads: 0 }
+	const api = { status: 'in_progress', body: BODY, patches: [] as string[], toasts: [] as string[], itemReads: 0 }
 	on('session.start', (_$, e) => ({ cwd: e.cwd }))
 	on('session.cwd', () => ({ value: '/repo' }))
 	on('fs.exists', (_$, e) => ({ value: e.path === '/repo/.floatee' || e.path.startsWith('/repo/.claude/commands/') }))
@@ -29,8 +29,8 @@ function repo(on: On) {
 		}
 		if (/\/items\/12\?/.test(e.url)) api.itemReads++
 		// The list carries each item's body, as the API's does.
-		const list = LIST.map(i => (i.id === 12 ? { ...i, bodyMd: api.body } : i))
-		const item = { id: 12, title: 'Fix the slider', status: 'in_progress', bodyMd: api.body, activity: [
+		const list = LIST.map(i => (i.id === 12 ? { ...i, status: api.status, bodyMd: api.body } : i)).filter(i => i.status !== 'done')
+		const item = { id: 12, title: 'Fix the slider', status: api.status, bodyMd: api.body, activity: [
 			{ kind: 'status_change', bodyMd: null, authorName: 'Bot', authorType: 'agent', meta: { from: 'pending', to: 'in_progress' }, createdAt: CLAIMED },
 		] }
 		return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(/\/items\/12\?/.test(e.url) ? item : list) } }
@@ -176,4 +176,19 @@ test('the ticket in progress leads in a section of its own, out of the Todos', a
 			{ id: 12, title: 'Fix the slider', status: 'in_progress', type: 'todo', sortOrder: 1 },
 			{ id: 15, title: 'Other', status: 'pending', type: 'todo', sortOrder: 2 })
 	}
+})
+
+test('#743: a ticket closed elsewhere is let go at the next refresh, and Run next comes back', async ($, on) => {
+	const api = repo(on)
+	await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+	await $.tool.call({ tool: 'Bash', command: 'node floatee.mjs start 12' })
+	const ui = await $.ui.mount({ plugin: 'floatee', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+	await ui.press({ key: 'fold' })
+	expect(await ui.find({ key: 'next' })).toBeUndefined()
+	expect(await text(ui)).toContain('1/3 done')
+
+	api.status = 'done' // closed on the web
+	await ui.press({ key: 'refresh' })
+	expect(await ui.find({ key: 'next' })).toBeDefined()
+	expect(await text(ui)).not.toContain('1/3 done')
 })

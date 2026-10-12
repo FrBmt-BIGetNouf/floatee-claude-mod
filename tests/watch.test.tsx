@@ -6,21 +6,24 @@ import { afterRun, WATCH_OFF } from '../hooks/watch'
 
 const PROPS = { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 100, scroll: { offset: 0, bodyRows: 10 }, view: {} }
 
-// A queue of pending todos (`api.queue`); `claim` hands out the first.
+// A queue of pending todos (`api.queue`); `claim` hands out the first, `start N`
+// puts N in progress, as the API does.
 function repo(on: On, extra = '') {
   // The engine's own band, beneath ours (#688): empty.
   on('ui.render', ($t, e) => { const { Box } = $t.ui.resolve(e); return <Box /> })
-	const api = { queue: [15, 18] as number[], ran: [] as string[], toasts: [] as string[] }
+	const api = { queue: [15, 18] as number[], started: null as number | null, ran: [] as string[], toasts: [] as string[] }
 	on('session.start', (_$, e) => ({ cwd: e.cwd }))
 	on('session.cwd', () => ({ value: '/repo' }))
 	on('fs.exists', (_$, e) => ({ value: e.path === '/repo/.floatee' || e.path.startsWith('/repo/.claude/commands/') }))
 	on('fs.read', () => ({ value: `token=flt_testtoken123\napi=https://example.test/api/v1\nproject=demo\n${extra}` }))
 	on('http.fetch', () => {
-		const list = api.queue.map((id, i) => ({ id, title: `Todo ${id}`, status: 'pending', type: 'todo', sortOrder: i }))
+		const list = api.queue.map((id, i) => ({ id, title: `Todo ${id}`, status: id === api.started ? 'in_progress' : 'pending', type: 'todo', sortOrder: i }))
 		return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(list) } }
 	})
 	on('tool.call', (_$, e) => {
 		const command = (e as { command?: string }).command ?? ''
+		const start = command.match(/start (\d+)/)
+		if (start) api.started = Number(start[1])
 		const out = /claim/.test(command) && api.queue[0] ? `# [#${api.queue[0]}] Todo` : 'ok'
 		return { result: { stdout: out, stderr: '', interrupted: false } } as never
 	})

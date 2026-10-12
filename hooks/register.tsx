@@ -225,6 +225,14 @@ async function refresh($: EngineInterface) {
 	// A reorder sends the project's whole order: only a full list holds it.
 	if (!mineOnly) await update($, order, () => rows.map(r => r.id))
 	await update($, error, () => null)
+	// #743: our ticket closed or released elsewhere (the web, another
+	// terminal): the session lets it go, or the buttons stay off.
+	if (await released($, rows)) {
+		await update($, active, () => null)
+		await update($, verified, () => false)
+		await update($, heard, () => false)
+		await loadTicket($)
+	}
 	// F3: our ticket's boxes ride in the list (its body); a full read only when
 	// the claim time is still missing.
 	const mine = await read($, active)
@@ -238,6 +246,17 @@ async function refresh($: EngineInterface) {
 	}
 	await watchReplies($, rows.filter(r => r.type === 'todo' && r.status === 'blocked'))
 	await maybeWatch($)
+}
+
+// Whether the session's ticket is no longer in progress: its row says so, or,
+// out of the list (closed, deleted, or not mine in the "mine" list), one read
+// tells. A failed read keeps it, unless the ticket is gone.
+async function released($: EngineInterface, rows: Array<{ id: number; status: string }>): Promise<boolean> {
+	const mine = await read($, active)
+	if (mine === null) return false
+	const row = rows.find(r => r.id === mine)
+	if (row) return row.status !== 'in_progress'
+	try { return (await fetchItem($, mine)).status !== 'in_progress' } catch (err) { return (err as Error).message === '404' }
 }
 
 // F9: the watcher starts a run when it is on, Claude idle, nothing queued, no
