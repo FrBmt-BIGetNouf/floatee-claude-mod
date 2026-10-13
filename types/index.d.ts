@@ -10,10 +10,15 @@ export type Item = {
   boxes: { done: number; total: number } | null
   updatedAt: number | null
   comments: number
+  /** #750: asleep until then (epoch, s); absent when awake. */
+  until?: number
 }
 
 /** A task box of a ticket's body: its line in the body, its text, checked or not. */
 export type Box = { line: number; text: string; isDone: boolean }
+
+/** #748: an entry of a ticket's activity: a comment (its public id `c3`, its markdown, edited since, whether this token may edit or delete it) or an event (its line, as the site words it; a resolution's note as `body`), or the ticket's opening; who and when (ms). */
+export type Entry = { key: number; kind: string; seq: number | null; author: string; at: number; body: string | null; event: string; isEdited: boolean; canEdit: boolean; isWontfix: boolean }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -46,12 +51,16 @@ declare module 'claude-code' {
       pausedUntil: number
       /** #679: the open ideas and notes, for the pane's sections. */
       others: Item[]
+      /** #750: the open items asleep (snoozed), apart from the list; the pane lists them. */
+      sleepers: Item[]
       /** #679: the pane's sections folded (ideas, notes), by name. */
       folds: Record<string, boolean>
       /** #679: `active` in detail for the pane: the start of its description and its last comment. */
       detail: { id: number; intro: string[]; last: { by: string; text: string } | null } | null
-      /** The new-ticket field (#680): open or not, the text typed so far, a create on its way. */
-      draft: { isOpen: boolean; text: string; isSending: boolean }
+      /** The new-ticket field (#680): open or not, the text typed so far, a create on its way. #751: the type, tags and position chosen in the form, and its tag field (open, text); its assignee and project (null: the defaults, this token and this project), its wake-up (epoch, s), the choice open with its options, and the date field (open, text). */
+      draft: { isOpen: boolean; text: string; isSending: boolean; type: 'todo' | 'idea' | 'note'; tags: string[]; position: 'top' | 'bottom'; isTagging: boolean; tagText: string; assignee: { value: string; label: string } | null; project: { value: string; label: string } | null; snooze: number | null; picking: 'assignee' | 'project' | null; choices: Array<{ value: string; label: string }> | null; isSnoozing: boolean; whenText: string }
+      /** #747: the ticket whose sheet is open (null: the list), the closing step asking for a text (blocked's why, a resolution note), the text typed, a write on its way, its description (the whole body; null until read). #748: its activity, newest first (null until read), the comment field's text and whether it is open, the comment it edits or asks to delete (cN), a comment on its way, and the whole thread shown in the band. #749: its assignee and project (names), the choice open (assign / move) with its options once read, and the tag field's text and whether it is open. #750: the snooze field open and its text, and a delete asked. #752: the body shown raw for editing, the line in the field (0 = the title) and its text. */
+      sheet: { id: number | null; step: 'blocked' | 'done' | 'wontfix' | null; text: string; isSending: boolean; body: string | null; feed: Entry[] | null; reply: string; isComposing: boolean; editing: number | null; deleting: number | null; isPosting: boolean; isAll: boolean; assignee: string | null; project: string | null; picking: 'assignee' | 'project' | null; choices: Array<{ value: string; label: string }> | null; tagText: string; isTagging: boolean; isSnoozing: boolean; whenText: string; isDeleting: boolean; isEditing: boolean; editLine: number | null; lineText: string }
       /** The running turn's id, what Stop ends; null between turns. */
       turnId: string | null
       /** Project slug, once a .floatee was found. */

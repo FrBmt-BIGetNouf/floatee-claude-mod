@@ -19,3 +19,14 @@ export function parseTicket(text: string): NewTicket | null {
 		.replace(/^\s*\n/, '').trim()
 	return body ? { body, type, tags } : null
 }
+
+// #751: whether the text names its type (`!idea`…), which then wins over the
+// form's buttons.
+export function namesType(text: string): boolean {
+	return /(^|[ \t])!(?:todo|idea|note)(?=\s|$)/i.test(text)
+}
+
+// #751: a `+tag` taken out of the text (its ✕ in the form's tags).
+export function dropTag(text: string, tag: string): string {
+	return text.replace(/(^|[ \t])\+([^\s+]+)(?=\s|$)/g, (m, lead: string, t: string) => (t.toLowerCase() === tag ? lead : m))
+}

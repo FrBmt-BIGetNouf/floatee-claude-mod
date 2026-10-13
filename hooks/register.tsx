@@ -26,10 +26,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, RenderNode } from 'claude-code'
 
-import type { Box, Item } from '../types'
+import type { Box, Entry, Item } from '../types'
 import { firstLine, reasonOf, replyOf } from './replies'
 import { afterRun, WATCH_ARGS, WATCH_OFF } from './watch'
-import { parseTicket } from './newticket'
+import { dropTag, namesType, parseTicket } from './newticket'
+import { blocks } from './markdown'
+import { wakeAt, wakeLabel } from './snooze'
+import type { Block, Span } from './markdown'
 import { boxes, claimedAt, elapsed, toggle, visible } from './checklist'
 import { parseConfig } from './config'
 import { ticketContext } from './context'
@@ -60,13 +63,22 @@ const notified = atom({ plugin: 'floatee', key: 'notified' } as const, {})
 // F9: the watcher.
 const watch = atom({ plugin: 'floatee', key: 'watch' } as const, WATCH_OFF)
 // #680: the new-ticket field.
-const DRAFT_OFF = { isOpen: false, text: '', isSending: false }
+// #751: its type, tags and place in the list, chosen in the form.
+const DRAFT_OFF = { isOpen: false, text: '', isSending: false, type: 'todo' as const, tags: [] as string[], position: 'top' as const, isTagging: false, tagText: '', assignee: null, project: null, snooze: null, picking: null, choices: null, isSnoozing: false, whenText: '' }
 const draft = atom({ plugin: 'floatee', key: 'draft' } as const, DRAFT_OFF)
+// #747: a ticket's sheet, open in place of the list.
+// #748: the band shows a ticket's last entries of activity, a comment cut to a few lines.
+const ENTRIES = 4
+const COMMENT_LINES = 3
+const SHEET_OFF = { id: null, step: null, text: '', isSending: false, body: null, feed: null, reply: '', isComposing: false, editing: null, deleting: null, isPosting: false, isAll: false, assignee: null, project: null, picking: null, choices: null, tagText: '', isTagging: false, isSnoozing: false, whenText: '', isDeleting: false, isEditing: false, editLine: null, lineText: '' }
+const sheet = atom({ plugin: 'floatee', key: 'sheet' } as const, SHEET_OFF)
 // #679: the list in the band above the prompt, or in a pane (docked beside the
 // transcript on a wide fullscreen terminal). Remembered across sessions.
 const layout = atom({ plugin: 'floatee', key: 'layout' } as const, 'band')
 const PANE = 'floatee'
 const others = atom({ plugin: 'floatee', key: 'others' } as const, [])
+// #750: the open items asleep (snoozed), apart: the pane lists them, a sheet wakes them.
+const sleepers = atom({ plugin: 'floatee', key: 'sleepers' } as const, [])
 const folds = atom({ plugin: 'floatee', key: 'folds' } as const, {})
 const detail = atom({ plugin: 'floatee', key: 'detail' } as const, null)
 // #669: only the tickets assigned to me (this token or its owner), remembered;
@@ -189,7 +201,7 @@ async function refresh($: EngineInterface) {
 	}
 	// Every open item (all types), so a reorder can send the project's whole order.
 	const mineOnly = await read($, isMine)
-	const url = `${config.api}/items?project=${encodeURIComponent(config.project)}&format=json&limit=200&create=0${mineOnly ? '&assignee=me' : ''}`
+	const url = `${config.api}/items?project=${encodeURIComponent(config.project)}&format=json&limit=200&sleeping=include&create=0${mineOnly ? '&assignee=me' : ''}`
 	let res
 	try {
 		res = await $.http.fetch(url, { headers: { Authorization: `Bearer ${config.token}` } })
@@ -208,13 +220,16 @@ async function refresh($: EngineInterface) {
 	await update($, pausedUntil, () => 0)
 	if (res.status === 404) { await fail($, 'unknown project: check project= in .floatee'); return }
 	if (!res.ok) { await fail($, `error ${res.status}`); return }
-	let rows: Array<{ id: number; title: string; status: string; type: string; sortOrder: number; bodyMd?: string; commentCount?: number; workspaceSlug?: string; tags?: string[]; checklist?: { done: number; total: number }; updatedAt?: number }>
-	try { rows = JSON.parse(res.text) } catch { await fail($, 'unreadable response'); return }
-	rows.sort((a, b) => a.sortOrder - b.sortOrder)
+	let all: Array<{ id: number; title: string; status: string; type: string; sortOrder: number; bodyMd?: string; commentCount?: number; workspaceSlug?: string; tags?: string[]; checklist?: { done: number; total: number }; updatedAt?: number; snoozeUntil?: number | null }>
+	try { all = JSON.parse(res.text) } catch { await fail($, 'unreadable response'); return }
+	all.sort((a, b) => a.sortOrder - b.sortOrder)
+	// #750: the sleeping ones come along, kept apart (the list is the awake).
+	const rows = all.filter(r => !r.snoozeUntil)
 	const toItem = (r: typeof rows[number]): Item => ({
 		id: r.id, title: plainTitle(r.title), status: r.status as Item['status'], ws: r.workspaceSlug ?? null,
 		type: r.type as Item['type'], tags: r.tags ?? [], boxes: r.checklist?.total ? r.checklist : null,
 		updatedAt: r.updatedAt ? r.updatedAt * 1000 : null, comments: r.commentCount ?? 0,
+		...(r.snoozeUntil ? { until: r.snoozeUntil } : {}),
 	})
 	const isOpen = (r: typeof rows[number]) => ['pending', 'in_progress', 'blocked'].includes(r.status)
 	const open: Item[] = rows.filter(r => r.type === 'todo' && isOpen(r)).map(toItem)
@@ -222,12 +237,13 @@ async function refresh($: EngineInterface) {
 	rebase = false
 	await update($, items, () => open)
 	await update($, others, () => rows.filter(r => (r.type === 'idea' || r.type === 'note') && isOpen(r)).map(toItem))
+	await update($, sleepers, () => all.filter(r => r.snoozeUntil && isOpen(r)).map(toItem))
 	// A reorder sends the project's whole order: only a full list holds it.
 	if (!mineOnly) await update($, order, () => rows.map(r => r.id))
 	await update($, error, () => null)
 	// #743: our ticket closed or released elsewhere (the web, another
 	// terminal): the session lets it go, or the buttons stay off.
-	if (await released($, rows)) {
+	if (await released($, all)) {
 		await update($, active, () => null)
 		await update($, verified, () => false)
 		await update($, heard, () => false)
@@ -409,21 +425,405 @@ async function createTicket($: EngineInterface, text: string) {
 	if (!config || (await read($, draft)).isSending) return
 	const t = parseTicket(text)
 	if (!t) { $.ui.toast('Nothing to create: type a title first'); return }
+	// #751: the form's type unless the text names one; its tags and the text's.
+	const form = await read($, draft)
+	const type = namesType(text) ? t.type : form.type
+	const tags = [...new Set([...(form.tags ?? []), ...t.tags])]
+	// #751: its project (this one unless chosen), assignee and wake-up.
+	const where = form.project?.value ?? config.project
 	await update($, draft, d => ({ ...d, text, isSending: true }))
 	try {
-		const res = await $.http.fetch(`${config.api}/items?project=${encodeURIComponent(config.project)}&format=json&create=0`, {
+		const res = await $.http.fetch(`${config.api}/items?project=${encodeURIComponent(where)}&format=json&create=0`, {
 			method: 'POST',
 			headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
-			body: JSON.stringify({ body_md: t.body, type: t.type, tags: t.tags, position: 'top' }),
+			body: JSON.stringify({
+				body_md: t.body, type, tags, position: form.position ?? 'top',
+				...(form.assignee ? { assignee_handle: form.assignee.value } : {}),
+				...(form.snooze ? { snooze_until: form.snooze } : {}),
+			}),
 		})
-		if (!res.ok) { $.ui.toast(`Could not create the ticket (${res.status})`); await update($, draft, d => ({ ...d, isSending: false })); return }
+		if (!res.ok) {
+			// The API's own words when it gives some (snooze is Pro).
+			let said = ''
+			try { const err = JSON.parse(res.text) as { detail?: string }; said = err.detail ?? '' } catch { /* no body */ }
+			$.ui.toast(said ? `Could not create the ticket: ${said}` : `Could not create the ticket (${res.status})`)
+			await update($, draft, d => ({ ...d, isSending: false }))
+			return
+		}
 		const made = JSON.parse(res.text) as { id?: number }
 		await update($, draft, () => DRAFT_OFF)
-		$.ui.toast(`Created #${made.id ?? '?'}: ${plainTitle(t.body.split('\n')[0] ?? '')}`, TOAST)
+		$.ui.toast(`Created #${made.id ?? '?'}${where === config.project ? '' : ` in ${form.project?.label ?? where}`}: ${plainTitle(t.body.split('\n')[0] ?? '')}`, TOAST)
 		await refresh($)
 	} catch {
 		$.ui.toast('Could not create the ticket: offline')
 		await update($, draft, d => ({ ...d, isSending: false }))
+	}
+}
+
+// #747: a ticket's sheet — its type and status changed from the band or the pane.
+type Status = Item['status'] | 'done' | 'wontfix'
+const STATUS_LABELS: Record<Status, string> = { pending: 'pending', in_progress: 'in progress', blocked: 'blocked', done: 'done', wontfix: "won't fix" }
+// A todo goes through every state; an idea or a note is open or closed.
+const statusesOf = (item: Item): Status[] => item.type === 'todo' ? ['pending', 'in_progress', 'blocked', 'done', 'wontfix'] : ['pending', 'done', 'wontfix']
+
+async function openSheet($: EngineInterface, id: number) {
+	await update($, draft, () => DRAFT_OFF)
+	await update($, sheet, () => ({ ...SHEET_OFF, id }))
+	await loadSheet($, id)
+}
+
+// Its body, read whole (the box lines count from its top), and #748 its
+// activity, as the site's feed draws it.
+async function loadSheet($: EngineInterface, id: number) {
+	try {
+		const item = await fetchItem($, id)
+		await update($, sheet, s => (s.id === id ? { ...s, body: item.bodyMd, feed: feedOf(item), assignee: item.assigneeName ?? null, project: item.projectName ?? null } : s))
+	} catch { /* the sheet goes without it */ }
+}
+
+// #749: a ticket's tags, assignee and project, changed from its sheet.
+async function setTags($: EngineInterface, item: Item, tags: string[]) {
+	if (!await patchItem($, item.id, { tags })) return
+	await refresh($)
+	await loadSheet($, item.id)
+}
+
+// The tags typed in the field (commas or spaces between them, a leading +
+// dropped), added to the ticket's.
+async function addTags($: EngineInterface, item: Item, text: string) {
+	const typed = text.split(/[\s,]+/).map(t => t.replace(/^\+/, '').trim()).filter(Boolean)
+	await update($, sheet, s => ({ ...s, tagText: '', isTagging: false }))
+	if (!typed.length) return
+	await setTags($, item, [...new Set([...(item.tags ?? []), ...typed])])
+}
+
+// Assign or move: the choices read when asked (the project's assignees, the
+// workspace's other projects), as a row of buttons.
+async function pickMeta($: EngineInterface, item: Item, what: 'assignee' | 'project') {
+	if (!config) return
+	await update($, sheet, s => ({ ...s, picking: what, choices: null, isTagging: false }))
+	try {
+		const choices = await choicesOf($, what, config.project, p => p.slug !== config!.project && (!item.ws || p.workspace?.slug === item.ws))
+		await update($, sheet, s => (s.id === item.id && s.picking === what ? { ...s, choices } : s))
+	} catch {
+		$.ui.toast(`Could not read the ${what === 'assignee' ? 'assignees' : 'projects'}`)
+		await update($, sheet, s => ({ ...s, picking: null }))
+	}
+}
+
+// Who can be assigned in `project` (me, its members and agents, nobody), or
+// the live projects `keep` keeps. Throws when the API says no.
+type Project = { slug: string; name: string; archived?: boolean; workspace?: { slug?: string } }
+async function choicesOf($: EngineInterface, what: 'assignee' | 'project', project: string, keep: (p: Project) => boolean = () => true): Promise<Array<{ value: string; label: string }>> {
+	if (!config) return []
+	const get = async (path: string) => {
+		const res = await $.http.fetch(`${config!.api}/${path}${path.includes('?') ? '&' : '?'}format=json&create=0`, { headers: { Authorization: `Bearer ${config!.token}` } })
+		if (!res.ok) throw new Error(String(res.status))
+		return JSON.parse(res.text) as unknown
+	}
+	if (what === 'assignee') {
+		const got = (await get(`project?project=${encodeURIComponent(project)}`)) as { assignees?: Array<{ handle: string; name: string; type: string }> }
+		return [{ value: 'me', label: 'me' }, ...(got.assignees ?? []).map(a => ({ value: a.handle, label: a.type === 'token' ? `${a.name} (agent)` : a.name })), { value: '', label: 'nobody' }]
+	}
+	return ((await get('projects')) as Project[]).filter(p => !p.archived && keep(p)).map(p => ({ value: p.slug, label: p.name }))
+}
+
+// #751: the New form's assign / move choices.
+async function pickNew($: EngineInterface, what: 'assignee' | 'project') {
+	if (!config) return
+	const d0 = await read($, draft)
+	await update($, draft, d => ({ ...d, picking: what, choices: null, isTagging: false, isSnoozing: false }))
+	try {
+		const choices = await choicesOf($, what, d0.project?.value ?? config.project)
+		await update($, draft, d => (d.picking === what ? { ...d, choices } : d))
+	} catch {
+		$.ui.toast(`Could not read the ${what === 'assignee' ? 'assignees' : 'projects'}`)
+		await update($, draft, d => ({ ...d, picking: null }))
+	}
+}
+
+async function assign($: EngineInterface, item: Item, handle: string) {
+	await update($, sheet, s => ({ ...s, picking: null, choices: null }))
+	if (!await patchItem($, item.id, { assignee_handle: handle })) return
+	$.ui.toast(handle ? `#${item.id} is assigned` : `#${item.id} is unassigned`, TOAST)
+	await loadSheet($, item.id)
+}
+
+// A move takes the ticket out of this project's list: the sheet closes.
+async function moveTo($: EngineInterface, item: Item, slug: string, name: string) {
+	if (!config) return
+	await update($, sheet, s => ({ ...s, picking: null, choices: null }))
+	try {
+		const res = await $.http.fetch(`${config.api}/project?project=${encodeURIComponent(slug)}&format=json&create=0`, { headers: { Authorization: `Bearer ${config.token}` } })
+		if (!res.ok) throw new Error(String(res.status))
+		const target = JSON.parse(res.text) as { id?: string }
+		if (!target.id) throw new Error('no id')
+		if (!await patchItem($, item.id, { project_id: target.id })) return
+	} catch {
+		$.ui.toast(`Could not move #${item.id}`)
+		return
+	}
+	$.ui.toast(`#${item.id} moved to ${name}`, TOAST)
+	await update($, sheet, () => SHEET_OFF)
+	await refresh($)
+}
+
+// #750: put a ticket to sleep until `epoch` (s), or wake it (null). The
+// API's refusal (snooze is Pro) is shown as it words it.
+async function snooze($: EngineInterface, item: Item, epoch: number | null) {
+	if (!config) return
+	try {
+		const res = await $.http.fetch(`${config.api}/items/${item.id}?project=${encodeURIComponent(config.project)}&format=json&create=0`, {
+			method: 'PATCH',
+			headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ snooze_until: epoch }),
+		})
+		if (!res.ok) {
+			let said = ''
+			try { const err = JSON.parse(res.text) as { detail?: string; error?: string }; said = err.detail ?? err.error ?? '' } catch { /* no body */ }
+			$.ui.toast(said ? `#${item.id}: ${said}` : `Could not ${epoch === null ? 'wake' : 'snooze'} #${item.id} (${res.status})`)
+			return
+		}
+	} catch {
+		$.ui.toast(`Could not ${epoch === null ? 'wake' : 'snooze'} #${item.id}: offline`)
+		return
+	}
+	const at = await $.clock.now().catch(() => Date.now())
+	$.ui.toast(epoch === null ? `#${item.id} is awake` : `#${item.id} sleeps until ${wakeLabel(epoch, at)}`, TOAST)
+	await update($, sheet, s => ({ ...s, isSnoozing: false, whenText: '' }))
+	await refresh($)
+	await loadSheet($, item.id)
+}
+
+// The field's text read as a delay or a date; a toast when it doesn't.
+async function snoozeTyped($: EngineInterface, item: Item, text: string) {
+	const at = await $.clock.now().catch(() => Date.now())
+	const epoch = wakeAt(text, at)
+	if (typeof epoch !== 'number') { $.ui.toast(epoch.error); return }
+	await snooze($, item, epoch)
+}
+
+// Delete, once asked (`isDeleting`): the ticket goes to the site's trash.
+async function deleteItem($: EngineInterface, item: Item) {
+	if (!config) return
+	try {
+		const res = await $.http.fetch(`${config.api}/items/${item.id}?project=${encodeURIComponent(config.project)}&create=0`, {
+			method: 'DELETE', headers: { Authorization: `Bearer ${config.token}` },
+		})
+		if (!res.ok) { $.ui.toast(`Could not delete #${item.id} (${res.status})`); return }
+	} catch {
+		$.ui.toast(`Could not delete #${item.id}: offline`)
+		return
+	}
+	$.ui.toast(`#${item.id} is deleted`, TOAST)
+	await update($, sheet, () => SHEET_OFF)
+	await refresh($)
+}
+
+// #752: one line of the body written (`text` at line `at`; `null` deletes
+// it; `insert` adds it after), on a fresh read: a body changed meanwhile is
+// not overwritten, the sheet reloads it instead. The first line is the title.
+async function writeLine($: EngineInterface, id: number, at: number, text: string | null, insert = false) {
+	const s0 = await read($, sheet)
+	if (s0.body === null || s0.isSending) return
+	await update($, sheet, s => ({ ...s, isSending: true }))
+	const done = (patch: Partial<typeof s0>) => update($, sheet, s => (s.id === id ? { ...s, isSending: false, ...patch } : s))
+	let fresh: FullItem
+	try { fresh = await fetchItem($, id) } catch { $.ui.toast(`Could not read #${id}`); await done({}); return }
+	if (fresh.bodyMd !== s0.body) {
+		$.ui.toast(`#${id} changed meanwhile: reloaded, nothing overwritten`)
+		await done({ body: fresh.bodyMd, feed: feedOf(fresh), editLine: null, lineText: '' })
+		return
+	}
+	const lines = fresh.bodyMd.split('\n')
+	if (insert) lines.splice(at + 1, 0, text ?? '')
+	else if (text === null) lines.splice(at, 1)
+	else lines[at] = text
+	const body = lines.join('\n')
+	if (!body.split('\n')[0]!.trim()) { $.ui.toast('The first line is the title: it cannot be empty'); await done({}); return }
+	if (!await patchItem($, id, { body_md: body })) { await done({}); return }
+	// An inserted line opens for typing; otherwise the line closes.
+	await done({ body, ...(insert ? { editLine: at + 1, lineText: '' } : { editLine: null, lineText: '' }) })
+	await refresh($)
+}
+
+// #748: the site's labels, for the feed's events.
+const STATUS_NAMES: Record<string, string> = { pending: 'Pending', in_progress: 'In progress', blocked: 'Blocked', done: 'Done', wontfix: "Won't fix" }
+const TYPE_NAMES: Record<string, string> = { todo: 'Todo', idea: 'Idea', note: 'Note' }
+
+// A ticket's activity, newest first, its opening last (as on the site): a
+// comment with its markdown, an event in a line, a resolution with its note
+// (the one in the event, else the ticket's on its latest resolution).
+function feedOf(item: FullItem): Entry[] {
+	const all = item.activity ?? []
+	const isResolution = (a: (typeof all)[number]) => a.kind === 'status_change' && (a.meta?.to === 'done' || a.meta?.to === 'wontfix')
+	const latest = all.filter(isResolution).at(-1)
+	const entries = all.map((a, n): Entry => {
+		const m = a.meta ?? {}
+		const event = a.kind === 'comment' ? ''
+			: a.kind === 'status_change' ? `${STATUS_NAMES[m.from ?? ''] ?? m.from} → ${STATUS_NAMES[m.to ?? ''] ?? m.to}`
+			: a.kind === 'promoted' ? `promoted ${TYPE_NAMES[m.from ?? ''] ?? m.from} → ${TYPE_NAMES[m.to ?? ''] ?? m.to}`
+			: a.kind === 'snoozed' ? 'snoozed 💤'
+			: a.kind === 'woke_up' ? 'woke up'
+			: a.kind === 'moved' ? 'moved project'
+			: a.kind === 'assigned' ? (m.to ? `assigned to ${m.to}` : 'unassigned')
+			: a.kind.replace('_', ' ')
+		const note = isResolution(a) ? (m.note?.trim() ? m.note : a === latest ? item.resolutionNote || null : null) : null
+		return {
+			key: a.id ?? n, kind: a.kind, seq: a.kind === 'comment' ? a.seq ?? null : null,
+			author: a.authorName ?? (a.authorType === 'agent' ? 'Agent' : 'Member'), at: (a.createdAt ?? 0) * 1000,
+			body: a.kind === 'comment' ? a.bodyMd : note, event, isEdited: Boolean(m.editedAt), canEdit: a.canEdit === true,
+			isWontfix: m.to === 'wontfix',
+		}
+	}).filter(e => e.kind !== 'comment' || (e.body && e.seq))
+	const opening: Entry = { key: -1, kind: 'opened', seq: null, author: item.createdByName ?? 'Unknown', at: (item.createdAt ?? 0) * 1000, body: null, event: 'opened', isEdited: false, canEdit: false, isWontfix: false }
+	return [...entries.reverse(), opening]
+}
+
+// One PATCH on a ticket; a toast says what failed. True when it went through.
+async function patchItem($: EngineInterface, id: number, body: Record<string, unknown>): Promise<boolean> {
+	if (!config) return false
+	try {
+		const res = await $.http.fetch(`${config.api}/items/${id}?project=${encodeURIComponent(config.project)}&format=json&create=0`, {
+			method: 'PATCH',
+			headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+		})
+		if (!res.ok) { $.ui.toast(`Could not update #${id} (${res.status})`); return false }
+		return true
+	} catch {
+		$.ui.toast(`Could not update #${id}: offline`)
+		return false
+	}
+}
+
+async function setType($: EngineInterface, item: Item, type: Item['type']) {
+	if (type === item.type) return
+	if (!await patchItem($, item.id, { type })) return
+	$.ui.toast(`#${item.id} is now ${type === 'idea' ? 'an idea' : `a ${type}`}`, TOAST)
+	await refresh($)
+}
+
+// A pick in the status list: pending and in progress act at once; blocked,
+// done and won't fix ask for their text first (the sheet's next step).
+async function pickStatus($: EngineInterface, item: Item, to: Status) {
+	if (to === 'blocked' || to === 'done' || to === 'wontfix') {
+		await update($, sheet, s => ({ ...s, step: to, text: '' }))
+		return
+	}
+	await update($, sheet, s => ({ ...s, step: null }))
+	if (to === item.status) return
+	const busy = await read($, isBusy)
+	if (to === 'in_progress') {
+		// In progress means someone works on it: this session, as ▶ Run.
+		if (busy || await read($, launched) !== null || await read($, active) !== null) {
+			$.ui.toast('Claude is on another ticket: try again when it is closed')
+			return
+		}
+		await update($, sheet, () => SHEET_OFF)
+		await launch($, item.id)
+		return
+	}
+	// Back to pending: the session's own ticket goes the ↩ Release way.
+	if (item.id === await read($, active)) {
+		if (busy) { $.ui.toast('Claude is busy: try again when the turn ends'); return }
+		await update($, sheet, () => SHEET_OFF)
+		await release($, 'band', true)
+		return
+	}
+	if (!await patchItem($, item.id, { status: 'pending' })) return
+	$.ui.toast(`#${item.id} is back in the queue`, TOAST)
+	await update($, sheet, () => SHEET_OFF)
+	await refresh($)
+}
+
+// The step's confirm: blocked with its why (required, a comment), done or
+// won't fix with a resolution note (optional); `verify` hands the closing to
+// Claude, who checks the work first.
+async function confirmStatus($: EngineInterface, item: Item, how: 'blocked' | 'done' | 'wontfix' | 'verify', text: string) {
+	if (!config || (await read($, sheet)).isSending) return
+	const note = text.trim()
+	if (how === 'blocked' && !note) { $.ui.toast('Say why it is blocked first'); return }
+	if (how === 'verify') {
+		if (await read($, isBusy) || await read($, launched) !== null) { $.ui.toast('Claude is busy: try again when the turn ends'); return }
+		await update($, sheet, () => SHEET_OFF)
+		await $.prompt.submit({
+			text: `Verify #${item.id}: run the repo's checks (tests, lint, typecheck or build) and make sure the work matches the ticket. If it holds, close it as done${note ? ` with this resolution note: ${note}` : ''}. If something fails, tell me and leave it open.`,
+			asUser: true,
+		})
+		return
+	}
+	await update($, sheet, s => ({ ...s, text, isSending: true }))
+	if (how === 'blocked') {
+		try {
+			const res = await $.http.fetch(`${config.api}/items/${item.id}/comments?project=${encodeURIComponent(config.project)}&create=0`, {
+				method: 'POST',
+				headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
+				body: JSON.stringify({ body_md: note }),
+			})
+			if (!res.ok) { $.ui.toast(`Could not comment on #${item.id} (${res.status})`); await update($, sheet, s => ({ ...s, isSending: false })); return }
+		} catch {
+			$.ui.toast(`Could not comment on #${item.id}: offline`)
+			await update($, sheet, s => ({ ...s, isSending: false }))
+			return
+		}
+	}
+	const body = how === 'blocked' ? { status: 'blocked' } : { status: how, resolution_note: note || null }
+	if (!await patchItem($, item.id, body)) { await update($, sheet, s => ({ ...s, isSending: false })); return }
+	$.ui.toast(`#${item.id} is ${STATUS_LABELS[how]}`, TOAST)
+	await update($, sheet, () => SHEET_OFF)
+	await refresh($)
+}
+
+// #748: a comment posted, or the one being edited saved (`editing`); the
+// thread read again after.
+async function sendComment($: EngineInterface, id: number, text: string) {
+	const s0 = await read($, sheet)
+	const body = text.trim()
+	if (!config || s0.isPosting || !body) return
+	const at = s0.editing
+	await update($, sheet, s => ({ ...s, reply: text, isPosting: true }))
+	if (!await commentCall($, id, at === null ? 'POST' : 'PATCH', at, { body_md: body })) { await update($, sheet, s => ({ ...s, isPosting: false })); return }
+	await update($, sheet, s => (s.id === id ? { ...s, reply: '', isComposing: false, editing: null, isPosting: false } : s))
+	await loadSheet($, id)
+	await refresh($)
+}
+
+// ✎: the comment back in the field, to fix and send again. The field is one
+// line: a comment on several is fixed on the site.
+async function editComment($: EngineInterface, item: Item, c: Entry) {
+	if (!c.seq || !c.body) return
+	if (c.body.includes('\n')) {
+		$.ui.toast(`c${c.seq} runs on several lines: fix it on the site`)
+		const url = pageOf(item)
+		if (url) await openPage($, url)
+		return
+	}
+	await update($, sheet, s => ({ ...s, reply: c.body!, isComposing: true, editing: c.seq, deleting: null }))
+}
+
+// ✕ asked first (`deleting`), then this.
+async function deleteComment($: EngineInterface, id: number, seq: number) {
+	if (!await commentCall($, id, 'DELETE', seq)) return
+	await update($, sheet, s => (s.id === id ? { ...s, deleting: null, ...(s.editing === seq ? { editing: null, reply: '', isComposing: false } : {}) } : s))
+	await loadSheet($, id)
+	await refresh($)
+}
+
+// One write on a ticket's comments; a toast says what failed.
+async function commentCall($: EngineInterface, id: number, method: 'POST' | 'PATCH' | 'DELETE', seq: number | null, body?: Record<string, unknown>): Promise<boolean> {
+	if (!config) return false
+	try {
+		const res = await $.http.fetch(`${config.api}/items/${id}/comments${seq === null ? '' : `/c${seq}`}?project=${encodeURIComponent(config.project)}&create=0`, {
+			method,
+			headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
+			...(body ? { body: JSON.stringify(body) } : {}),
+		})
+		if (!res.ok) { $.ui.toast(`Could not ${method === 'DELETE' ? 'delete' : 'save'} the comment on #${id} (${res.status})`); return false }
+		return true
+	} catch {
+		$.ui.toast(`Could not ${method === 'DELETE' ? 'delete' : 'save'} the comment on #${id}: offline`)
+		return false
 	}
 }
 
@@ -464,7 +864,14 @@ async function bodyFile($: EngineInterface, command: string): Promise<string> {
 	try { return (await $.fs.exists(path)) ? await $.fs.read(path) : '' } catch { return '' }
 }
 
-type FullItem = ApiItem & { activity?: Array<{ kind: string; bodyMd: string | null; authorName: string | null; authorType: string; meta?: { to?: string } | null; createdAt?: number }> }
+type FullItem = ApiItem & {
+	resolutionNote?: string | null
+	createdByName?: string | null
+	assigneeName?: string | null
+	projectName?: string | null
+	createdAt?: number
+	activity?: Array<{ kind: string; seq?: number | null; bodyMd: string | null; authorName: string | null; authorType: string; id?: number; meta?: { from?: string; to?: string; note?: string; editedAt?: number } | null; createdAt?: number; canEdit?: boolean }>
+}
 
 // One item, whole (body and activity); throws when the API says no.
 async function fetchItem($: EngineInterface, id: number): Promise<FullItem> {
@@ -476,7 +883,8 @@ async function fetchItem($: EngineInterface, id: number): Promise<FullItem> {
 	return item
 }
 
-async function setChecklist($: EngineInterface, item: FullItem) {
+async function setChecklist($: EngineInterface, item: FullItem) { await setChecklistOf($, item) }
+async function setChecklistOf($: EngineInterface, item: FullItem) {
 	await update($, checklist, () => ({ id: item.id, boxes: boxes(item.bodyMd), since: claimedAt(item.activity) }))
 	// #679: the pane details it too: its description's first lines (the title,
 	// boxes and code left out) and its last comment.
@@ -526,20 +934,26 @@ async function tick($: EngineInterface, id: number, box: Box) {
 	await update($, checklist, c => c && c.id === id
 		? { ...c, boxes: c.boxes.map(b => (b.line === box.line ? { ...b, isDone: !b.isDone } : b)) }
 		: c)
+	// #747: a box pressed in a ticket's sheet; the session's checklist is its
+	// own ticket's alone.
+	const ours = id === await read($, active)
+	const sheetBody = (body: string) => update($, sheet, s => (s.id === id ? { ...s, body } : s))
+	await update($, sheet, s => (s.id === id && s.body !== null ? { ...s, body: toggle(s.body, box) ?? s.body } : s))
+	const setChecklist = async (item: FullItem) => { await sheetBody(item.bodyMd); if (ours) await setChecklistOf($, item) }
 	try {
 		const item = await fetchItem($, id)
 		const body = toggle(item.bodyMd, box)
-		if (body === null) { $.ui.toast(`#${id} changed meanwhile: box not updated`); await setChecklist($, item); return }
+		if (body === null) { $.ui.toast(`#${id} changed meanwhile: box not updated`); await setChecklist(item); return }
 		const res = await $.http.fetch(`${config.api}/items/${id}?project=${encodeURIComponent(config.project)}&format=json&create=0`, {
 			method: 'PATCH',
 			headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
 			body: JSON.stringify({ body_md: body }),
 		})
-		if (!res.ok) { $.ui.toast(`Could not update #${id} (${res.status})`); await setChecklist($, item); return }
-		await setChecklist($, { ...item, bodyMd: body })
+		if (!res.ok) { $.ui.toast(`Could not update #${id} (${res.status})`); await setChecklist(item); return }
+		await setChecklist({ ...item, bodyMd: body })
 	} catch {
 		$.ui.toast(`Could not update #${id}: offline`)
-		await loadChecklist($)
+		if (ours) await loadChecklist($)
 	}
 }
 
@@ -618,9 +1032,13 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 
 	const elements = $.ui.resolve(e)
 	const { Box, Button, Text } = elements
-	// No Input on the mobile app: no field there.
-	const Input = 'Input' in elements ? elements.Input : null
+	// No Input on the mobile app: no field there. (Its table may still name
+	// it: the surface tells.)
+	const hasFields = e.surface !== 'mobile'
+	const Input = hasFields && 'Input' in elements ? elements.Input : null
 	const typed = await read($, draft)
+	// (Over SHEET_OFF: a sheet a previous version left in the state lacks the fields since.)
+	const opened = { ...SHEET_OFF, ...await read($, sheet) }
 	// A ticket's `#id` opens its page in the web app (#677): a bare Button,
 	// not a Link, which a terminal without OSC 8 draws with the URL spelled
 	// out beside it. A Button takes no color: the id draws plain. Plain text
@@ -743,7 +1161,7 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 				{mineOnly
 					? <Button key="mine" label={narrow ? '◐' : '◐ Mine'} variant="primary" onPress={() => toggleMine($)} />
 					: <Button key="mine" label={narrow ? glyph('◐') : '◐ Mine'} plain={chip2} dimColor onPress={() => toggleMine($)} />}
-				{Input && <Button key="new" label={narrow ? glyph('✎') : '✎ New'} plain={chip2} onPress={() => update($, draft, d => ({ ...d, isOpen: true }))} />}
+				{Input && <Button key="new" label={narrow ? glyph('✎') : '✎ New'} plain={chip2} onPress={async () => { await update($, sheet, () => SHEET_OFF); await update($, draft, d => ({ ...d, isOpen: true })) }} />}
 			</Box>}
 		</Box>
 	)
@@ -755,9 +1173,45 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 	// (The engine always draws ` ⏎ <submitLabel>` after a focused field: an
 	// empty label leaves the bare ⏎.)
 	if (Input && typed.isOpen) {
+		const nowMs = (await read($, now)) ?? 0
 		const text = typed.text
+		const parsed = parseTicket(text)
+		const newType = namesType(text) && parsed ? parsed.type : typed.type ?? 'todo'
+		const newTags = [...new Set([...(typed.tags ?? []), ...(parsed?.tags ?? [])])]
+		const newLabel = (name: string) => <Box flexShrink={0}><Text dimColor>{name.padEnd(8)}</Text></Box>
+		// Assignee and project as the sheet's: the choice, then its options on a press.
+		const newPick = (what: 'assignee' | 'project', name: string, value: string, action: string) => (
+			<Box flexDirection="column">
+				<Box gap={1}>
+					{newLabel(name)}
+					<Text wrap="truncate-end">{value}</Text>
+					{typed.picking !== what && <Button key={`new-${what}`} label={action} dimColor onPress={() => pickNew($, what)} />}
+				</Box>
+				{typed.picking === what && (
+					<Box gap={1} flexWrap="wrap" paddingLeft={9}>
+						{typed.choices === null && <Text dimColor>…</Text>}
+						{typed.choices?.map(c => (
+							<Button key={`new-${what}-${c.value || 'none'}`} label={c.label}
+								onPress={() => update($, draft, d => ({ ...d, picking: null, choices: null, ...(what === 'assignee' ? { assignee: c } : { project: c, ...(d.project?.value !== c.value ? { assignee: null } : {}) }) }))} />
+						))}
+						<Button key={`new-${what}-cancel`} label="Cancel" dimColor onPress={() => update($, draft, d => ({ ...d, picking: null, choices: null }))} />
+					</Box>
+				)}
+			</Box>
+		)
+		// A band too short for it all keeps the field: the blank lines go
+		// first, then the settings (the text's +tag and !type still work).
+		const isRoomy = site.isPane || site.maxRows >= 21
+		const hasSettings = site.isPane || site.maxRows >= 16
+		const newHead = (name: string) => (
+			<Box key={`new-section-${name}`} flexDirection="column" marginTop={isRoomy ? 1 : 0}>
+				<Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(10, site.bodyColumns - 4))}</Text>
+				<Text color={brand} bold>{name}</Text>
+				{isRoomy && <Text> </Text>}
+			</Box>
+		)
 		return (
-			<Box flexDirection="column" {...frame} gap={1}>
+			<Box flexDirection="column" {...frame}>
 				<Box justifyContent="space-between" gap={1}>
 					<Box gap={1} flexShrink={1} overflow="hidden">
 						<Text color={brand} bold>⨳ Floatee</Text>
@@ -768,14 +1222,88 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 						<Button key="new-create" label={typed.isSending ? '… Creating' : '✓ Create'} variant="primary" dimColor={typed.isSending} onPress={() => createTicket($, text)} />
 					</Box>
 				</Box>
-				<Input key="new-ticket" value={text} placeholder="Click here, then type the title…" submitLabel="" autoFocus
+				{/* #751: the ticket's settings first, then its content, each under a
+				    rule, as the sheet's sections. */}
+				{hasSettings && newHead('Settings')}
+				{/* (A !type or +tag typed shows here too; the text's type wins.) */}
+				{hasSettings && <Box flexDirection="column">
+					<Box gap={1}>
+						{newLabel('Type')}
+						{(['todo', 'idea', 'note'] as const).map(v => (
+							<Button key={`new-type-${v}`} label={v} variant={v === newType ? 'primary' : undefined} dimColor={v !== newType}
+								onPress={() => (namesType(text) ? $.ui.toast(`The text says !${newType}: take it out to choose here`) : update($, draft, d => ({ ...d, type: v })))} />
+						))}
+					</Box>
+					<Box gap={1} flexWrap="wrap">
+						{newLabel('Tags')}
+						{newTags.length === 0 && !typed.isTagging && <Text dimColor>none</Text>}
+						{newTags.map(t => (
+							<Button key={`new-tag-${t}`} label={`+${t} ✕`} plain
+								onPress={() => update($, draft, d => ({ ...d, tags: (d.tags ?? []).filter(x => x !== t), text: dropTag(d.text, t) }))} />
+						))}
+						{!typed.isTagging && <Button key="new-tag-add" label="+ tag" dimColor onPress={() => update($, draft, d => ({ ...d, isTagging: true, tagText: '' }))} />}
+					</Box>
+					{typed.isTagging && (
+						<Box gap={1}>
+							{newLabel('')}
+							<Box flexGrow={1}>
+								<Input key="new-tag" value={typed.tagText ?? ''} submitLabel="" autoFocus placeholder="tags, comma or space between"
+									onInput={v => { void update($, draft, d => ({ ...d, tagText: v })) }}
+									onSubmit={v => { void update($, draft, d => ({ ...d, isTagging: false, tagText: '', tags: [...new Set([...(d.tags ?? []), ...v.split(/[\s,]+/).map(x => x.replace(/^\+/, '').trim().toLowerCase()).filter(Boolean)])] })) }} />
+							</Box>
+							<Button key="new-tag-cancel" label="Cancel" dimColor onPress={() => update($, draft, d => ({ ...d, isTagging: false, tagText: '' }))} />
+						</Box>
+					)}
+					<Box gap={1}>
+						{newLabel('Position')}
+						{(['top', 'bottom'] as const).map(v => (
+							<Button key={`new-position-${v}`} label={`${v === 'top' ? '↑' : '↓'} ${v}`} variant={v === (typed.position ?? 'top') ? 'primary' : undefined} dimColor={v !== (typed.position ?? 'top')}
+								onPress={() => update($, draft, d => ({ ...d, position: v }))} />
+						))}
+					</Box>
+					{newPick('assignee', 'Assignee', typed.assignee?.label ?? 'default (this token)', 'assign')}
+					{newPick('project', 'Project', typed.project?.label ?? slug, 'change')}
+					<Box gap={1} flexWrap="wrap">
+						{newLabel('Sleep')}
+						{typed.snooze
+							? <Box gap={1}>
+								<Text color="suggestion">{`💤 until ${wakeLabel(typed.snooze, nowMs)}`}</Text>
+								<Button key="new-snooze-clear" label="✕" plain dimColor onPress={() => update($, draft, d => ({ ...d, snooze: null }))} />
+							</Box>
+							: <Box gap={1}>
+								<Text dimColor>awake</Text>
+								{([['1 day', 86400], ['3 days', 3 * 86400], ['1 week', 7 * 86400]] as const).map(([name, sec]) => (
+									<Button key={`new-snooze-${sec}`} label={name} dimColor onPress={() => update($, draft, d => ({ ...d, snooze: Math.floor((nowMs) / 1000) + sec }))} />
+								))}
+								{!typed.isSnoozing && <Button key="new-snooze-date" label="date…" dimColor onPress={() => update($, draft, d => ({ ...d, isSnoozing: true, whenText: '', isTagging: false, picking: null }))} />}
+							</Box>}
+					</Box>
+					{typed.isSnoozing && !typed.snooze && (
+						<Box gap={1}>
+							{newLabel('')}
+							<Box flexGrow={1}>
+								<Input key="new-when" value={typed.whenText ?? ''} submitLabel="" autoFocus placeholder="2026-11-03, 2026-11-03T09:00, 2w…"
+									onInput={v => { void update($, draft, d => ({ ...d, whenText: v })) }}
+									onSubmit={v => {
+										const epoch = wakeAt(v, nowMs)
+										if (typeof epoch !== 'number') { $.ui.toast(epoch.error); return }
+										void update($, draft, d => ({ ...d, snooze: epoch, isSnoozing: false, whenText: '' }))
+									}} />
+							</Box>
+							<Button key="new-when-cancel" label="Cancel" dimColor onPress={() => update($, draft, d => ({ ...d, isSnoozing: false, whenText: '' }))} />
+						</Box>
+					)}
+				</Box>}
+				{newHead('Content')}
+				<Input key="new-ticket" value={text} placeholder="Click here, then type the title…" submitLabel="" {...(typed.isTagging ? {} : { autoFocus: true as const })}
 					onInput={v => { void update($, draft, d => ({ ...d, text: v })) }}
 					onSubmit={v => { void createTicket($, v) }} />
-				<Text color="gray" wrap="truncate-end">First line = title · Alt+Enter: new line · +tag · !idea !note · Enter: create</Text>
+				{isRoomy && <Text> </Text>}
+				<Text color="gray" wrap="wrap">First line = title · Alt+Enter: new line · +tag · !idea !note · Enter: create</Text>
 			</Box>
 		)
 	}
-	if (folded) return <Box {...frame} flexDirection="column">{header}</Box>
+	if (folded && opened.id === null) return <Box {...frame} flexDirection="column">{header}</Box>
 
 	// Frame (2) + header (2 and a blank) + the "+N" line (1) must fit the rows granted.
 	// The pane draws every row and the whole checklist: its body scrolls.
@@ -786,6 +1314,7 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 	const held = await read($, checklist)
 	const card = !problem && mine !== null && held?.id === mine ? held : null
 	const ticked = await read($, now)
+	const asleep = await read($, sleepers)
 	// Past BOXES boxes, a last line counts what's left out and opens the
 	// whole list, as far as the rows granted go (our row, the summary and
 	// that line kept).
@@ -861,23 +1390,422 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 			</Box>
 		)
 	}
-	const watchedNow = await read($, blocked)
-	const folded2 = site.isPane ? await read($, folds) : {}
+	const folded2 = await read($, folds)
 	const kept = site.isPane ? await read($, others) : []
-	// Ideas and notes start folded; a press keeps the person's choice.
-	const isFolded = (name: string) => folded2[name] ?? true
+	// Ideas and notes start folded (a sheet's description open); a press keeps
+	// the person's choice.
+	const isFolded = (name: string, byDefault = true) => folded2[name] ?? byDefault
 	// Each section opens on a dim rule across the pane, then its name: the
 	// todos, the blocked, the ideas and the notes read apart.
 	const rule = '─'.repeat(Math.max(10, site.bodyColumns - 4))
-	const sectionHead = (name: string, label: string, count: number | null, color: string, canFold: boolean) => (
-		<Box key={`section-${name}`} flexDirection="column" marginTop={1}>
-			<Text dimColor wrap="truncate-end">{rule}</Text>
-			{canFold
-				? <Button key={`fold-${name}`} label={`${isFolded(name) ? '▸' : '▾'} ${label} (${count})`} plain onPress={() => update($, folds, f => ({ ...f, [name]: !(f[name] ?? true) }))} />
-				: <Text color={color} bold>{count === null ? label : `${label} (${count})`}</Text>}
-		</Box>
-	)
+	// (`aside`: what the section's head carries on its right, a button.)
+	const sectionHead = (name: string, label: string, count: number | null, color: string, canFold: boolean, byDefault = true, aside?: RenderNode | false) => {
+		const head = canFold
+			? <Button key={`fold-${name}`} label={`${isFolded(name, byDefault) ? '▸' : '▾'} ${label}${count === null ? '' : ` (${count})`}`} plain onPress={() => update($, folds, f => ({ ...f, [name]: !(f[name] ?? byDefault) }))} />
+			: <Text color={color} bold>{count === null ? label : `${label} (${count})`}</Text>
+		return (
+			<Box key={`section-${name}`} flexDirection="column" marginTop={1}>
+				<Text dimColor wrap="truncate-end">{rule}</Text>
+				{aside ? <Box justifyContent="space-between" gap={1}>{head}{aside}</Box> : head}
+			</Box>
+		)
+	}
 
+	// #747: a ticket's sheet takes the list's place, folded or not: its title,
+	// tags and facts, then its type and status. Blocked, done and won't fix
+	// open a field for their text (the why, a resolution note) and their
+	// confirms. The mobile app draws no field nor list: buttons there, and the
+	// steps that need a text (blocked) left out.
+	if (opened.id !== null) {
+		const item = [...list, ...await read($, others), ...await read($, sleepers)].find(i => i.id === opened.id) ?? null
+		const back = <Button key="sheet-back" label="← Back" variant="primary" onPress={() => update($, sheet, () => SHEET_OFF)} />
+		const top = (
+			<Box justifyContent="space-between" gap={1}>
+				<Box gap={1} flexShrink={1} overflow="hidden">
+					<Text color={brand} bold>⨳ Floatee</Text>
+					{item ? idOf(item, brand) : <Text dimColor>{`#${opened.id}`}</Text>}
+				</Box>
+				<Box gap={1} flexShrink={0}>
+					{item && pageOf(item) && <Button key="sheet-open" label="↗ Open" dimColor onPress={() => openPage($, pageOf(item)!)} />}
+					{back}
+				</Box>
+			</Box>
+		)
+		if (!item) {
+			return (
+				<Box flexDirection="column" {...frame}>
+					{top}
+					<Text dimColor>{`#${opened.id} is no longer open.`}</Text>
+				</Box>
+			)
+		}
+		const statuses = statusesOf(item)
+		const step = opened.step
+		const sending = opened.isSending
+		// #747: a row of buttons each, the current one lit (a Select's list
+		// stays open in the terminal). Blocked, done and won't fix open their
+		// field; without fields (mobile), done and won't fix close at once and
+		// blocked, which needs its why, is left out.
+		// #749: the rows' names, in one column.
+		const label = (name: string) => <Box flexShrink={0}><Text dimColor>{name.padEnd(8)}</Text></Box>
+		// Its tags, each a press away from going (the whole `+tag ✕`); + tag
+		// opens a field (none on mobile).
+		const tags = item.tags ?? []
+		const tagLine = (
+			<Box gap={1} flexWrap="wrap">
+				{label('Tags')}
+				{tags.length === 0 && !opened.isTagging && <Text dimColor>none</Text>}
+				{tags.map(t => (
+					<Button key={`sheet-tag-${t}`} label={`+${t} ✕`} plain onPress={() => setTags($, item, tags.filter(x => x !== t))} />
+				))}
+				{Input && !opened.isTagging && <Button key="sheet-tag-add" label="+ tag" dimColor onPress={() => update($, sheet, s => ({ ...s, isTagging: true, tagText: '', picking: null }))} />}
+			</Box>
+		)
+		const tagField = Input && opened.isTagging && (
+			<Box gap={1}>
+				{label('')}
+				<Box flexGrow={1}>
+					<Input key="sheet-tag" value={opened.tagText} submitLabel="" autoFocus placeholder="tags, comma or space between"
+						onInput={v => { void update($, sheet, s => ({ ...s, tagText: v })) }}
+						onSubmit={v => { void addTags($, item, v) }} />
+				</Box>
+				<Button key="sheet-tag-cancel" label="Cancel" dimColor onPress={() => update($, sheet, s => ({ ...s, isTagging: false, tagText: '' }))} />
+			</Box>
+		)
+		// Assignee and project: the current one, then its choices on a press.
+		const metaLine = (what: 'assignee' | 'project', name: string, value: string | null, action: string) => (
+			<Box flexDirection="column">
+				<Box gap={1}>
+					{label(name)}
+					<Text dimColor={!value} wrap="truncate-end">{value ?? 'nobody'}</Text>
+					{opened.picking !== what && <Button key={`sheet-${what}`} label={action} dimColor onPress={() => pickMeta($, item, what)} />}
+				</Box>
+				{opened.picking === what && (
+					<Box gap={1} flexWrap="wrap" paddingLeft={9}>
+						{opened.choices === null && <Text dimColor>…</Text>}
+						{opened.choices?.length === 0 && <Text dimColor>{what === 'project' ? 'No other project in this workspace.' : 'Nobody to assign.'}</Text>}
+						{opened.choices?.map(c => (
+							<Button key={`sheet-${what}-${c.value || 'none'}`} label={c.label}
+								onPress={() => (what === 'assignee' ? assign($, item, c.value) : moveTo($, item, c.value, c.label))} />
+						))}
+						<Button key={`sheet-${what}-cancel`} label="Cancel" dimColor onPress={() => update($, sheet, s => ({ ...s, picking: null, choices: null }))} />
+					</Box>
+				)}
+			</Box>
+		)
+		// #750: asleep, its wake-up and ☀ wake; awake, the short delays and a
+		// date (a field; none on mobile). Then delete, asked first.
+		const SNOOZES: Array<[string, number]> = [['1 day', 86400], ['3 days', 3 * 86400], ['1 week', 7 * 86400]]
+		const sleepLine = (
+			<Box gap={1} flexWrap="wrap">
+				{label('Sleep')}
+				{item.until
+					? <Box gap={1}>
+						<Text color="suggestion">{`💤 until ${wakeLabel(item.until, ticked ?? 0)}`}</Text>
+						<Button key="sheet-wake" label="☀ wake" onPress={() => snooze($, item, null)} />
+					</Box>
+					: <Box gap={1}>
+						{SNOOZES.map(([name, s]) => (
+							<Button key={`sheet-snooze-${s}`} label={name} dimColor onPress={() => snooze($, item, Math.floor((ticked ?? 0) / 1000) + s)} />
+						))}
+						{Input && !opened.isSnoozing && <Button key="sheet-snooze-date" label="date…" dimColor onPress={() => update($, sheet, s => ({ ...s, isSnoozing: true, whenText: '', isTagging: false, picking: null }))} />}
+					</Box>}
+			</Box>
+		)
+		const whenField = Input && opened.isSnoozing && !item.until && (
+			<Box gap={1}>
+				{label('')}
+				<Box flexGrow={1}>
+					<Input key="sheet-when" value={opened.whenText} submitLabel="" autoFocus placeholder="2026-11-03, 2026-11-03T09:00, 2w…"
+						onInput={v => { void update($, sheet, s => ({ ...s, whenText: v })) }}
+						onSubmit={v => { void snoozeTyped($, item, v) }} />
+				</Box>
+				<Button key="sheet-when-cancel" label="Cancel" dimColor onPress={() => update($, sheet, s => ({ ...s, isSnoozing: false, whenText: '' }))} />
+			</Box>
+		)
+		const deleteLine = (
+			<Box gap={1} justifyContent="flex-end" marginTop={1}>
+				{opened.isDeleting
+					? <Box gap={1}>
+						<Text color="warning">{`Delete #${item.id}?`}</Text>
+						<Button key="sheet-delete-item-confirm" label="🗑 Delete" variant="primary" onPress={() => deleteItem($, item)} />
+						<Button key="sheet-delete-item-cancel" label="Cancel" dimColor onPress={() => update($, sheet, s => ({ ...s, isDeleting: false }))} />
+					</Box>
+					: <Button key="sheet-delete-item" label="🗑 Delete" dimColor onPress={() => update($, sheet, s => ({ ...s, isDeleting: true }))} />}
+			</Box>
+		)
+		const typeLine = (
+			<Box gap={1}>
+				{label('Type')}
+				{(['todo', 'idea', 'note'] as const).map(v => (
+					<Button key={`sheet-type-${v}`} label={v} variant={v === item.type ? 'primary' : undefined} dimColor={v !== item.type} onPress={() => setType($, item, v)} />
+				))}
+			</Box>
+		)
+		const lit = step ?? item.status
+		const statusLine = (
+			<Box gap={1} flexWrap="wrap">
+				{label('Status')}
+				{statuses.filter(v => Input || v !== 'blocked').map(v => (
+					<Button key={`sheet-status-${v}`} label={STATUS_LABELS[v]} variant={v === lit ? 'primary' : undefined} dimColor={v !== lit}
+						onPress={() => (!Input && (v === 'done' || v === 'wontfix') ? confirmStatus($, item, v, '') : pickStatus($, item, v))} />
+				))}
+			</Box>
+		)
+		// The step's field and confirms: Enter does the first one.
+		const stepView = Input && step && (
+			<Box flexDirection="column" marginTop={1}>
+				<Input key="sheet-note" value={opened.text} submitLabel="" autoFocus
+					placeholder={step === 'blocked' ? 'Why is it blocked? (required)' : 'Resolution note (optional)'}
+					onInput={v => { void update($, sheet, s => ({ ...s, text: v })) }}
+					onSubmit={v => { void confirmStatus($, item, step, v) }} />
+				<Box gap={1} justifyContent="flex-end">
+					{step === 'blocked' && <Button key="sheet-confirm" label={sending ? '… Saving' : '⊝ Block'} variant="primary" dimColor={sending} onPress={() => confirmStatus($, item, 'blocked', opened.text)} />}
+					{step === 'done' && <Button key="sheet-confirm" label={sending ? '… Saving' : '✓ Done'} variant="primary" dimColor={sending} onPress={() => confirmStatus($, item, 'done', opened.text)} />}
+					{step === 'done' && <Button key="sheet-verify" label="✓ Verify & close" dimColor={busy} onPress={() => confirmStatus($, item, 'verify', opened.text)} />}
+					{step === 'wontfix' && <Button key="sheet-confirm" label={sending ? '… Saving' : "✕ Won't fix"} variant="primary" dimColor={sending} onPress={() => confirmStatus($, item, 'wontfix', opened.text)} />}
+					<Button key="sheet-cancel" label="Cancel" dimColor onPress={() => update($, sheet, s => ({ ...s, step: null, text: '' }))} />
+				</Box>
+			</Box>
+		)
+		// Its description, its markdown drawn: headings, lists, boxes, quotes,
+		// code, and the inline styles. The pane shows it whole; the band what
+		// its rows leave, each line cut at the edge, the rest counted.
+		const wrap = site.isPane ? 'wrap' as const : 'truncate-end' as const
+		const spansOf = (spans: Span[], base: { dimColor?: boolean; italic?: boolean } = {}) => spans.map((sp, n) => (
+			<Text key={`s-${n}`} {...base} bold={sp.bold} italic={sp.italic || base.italic} strikethrough={sp.strike}
+				underline={sp.link} color={sp.code ? 'permission' : sp.link ? 'suggestion' : undefined}>{sp.text}</Text>
+		))
+		// A list's marker hangs: its wrapped lines start under the text.
+		const hanging = (key: string, indent: number, marker: RenderChildren, body: RenderChildren) => (
+			<Box key={key} paddingLeft={indent * 2} gap={1}>
+				<Box flexShrink={0}>{marker}</Box>
+				<Text wrap={wrap}>{body}</Text>
+			</Box>
+		)
+		// (`pressed` pairs task blocks with the body's boxes: the description's;
+		// a comment's boxes don't press.)
+		const drawnWith = (pressed: ReadonlyMap<number, ReturnType<typeof boxes>[number]>, prefix: string) => (b: Block, n: number) => {
+			const key = `${prefix}-${n}`
+			switch (b.kind) {
+				case 'heading': return <Text key={key} wrap={wrap} bold color={brand}>{spansOf(b.spans)}</Text>
+				case 'item': return hanging(key, b.indent, <Text dimColor>{b.marker}</Text>, spansOf(b.spans))
+				case 'task': {
+					// A box presses as in the band: its whole line, the label cut by
+					// hand (a Button's label doesn't wrap).
+					const box = pressed.get(n)
+					const words = b.spans.map(sp => sp.text).join('')
+					const room = Math.max(10, site.bodyColumns - 8 - b.indent * 2)
+					const label = `${b.isDone ? '☑' : '☐'} ${words.length > room ? `${words.slice(0, room - 1)}…` : words}`
+					return box
+						? <Box key={key} paddingLeft={b.indent * 2}><Button key={`sheet-box-${box.line}`} label={label} plain dimColor={b.isDone} onPress={() => tick($, item.id, box)} /></Box>
+						: hanging(key, b.indent, <Text color={b.isDone ? 'success' : undefined}>{b.isDone ? '☑' : '☐'}</Text>, spansOf(b.spans, { dimColor: b.isDone }))
+				}
+				case 'quote': return hanging(key, 0, <Text dimColor>│</Text>, spansOf(b.spans, { dimColor: true, italic: true }))
+				case 'code': return <Text key={key} wrap={wrap} color="permission">{`  ${b.text || ' '}`}</Text>
+				case 'rule': return <Text key={key} dimColor wrap="truncate-end">{'─'.repeat(Math.max(10, site.bodyColumns - 4))}</Text>
+				case 'blank': return <Text key={key}> </Text>
+				case 'para': return <Text key={key} wrap={wrap}>{spansOf(b.spans)}</Text>
+			}
+		}
+		// The description: the whole body, its first line (the title) included,
+		// as the site draws it. Its task blocks pair with the body's boxes in
+		// order (the same reading, code skipped), so a press flips the right
+		// line; when they don't pair, none presses.
+		const body = opened.body ?? ''
+		const lines = blocks(body)
+		const theBoxes = boxes(body)
+		const tasks = lines.flatMap((b, n) => (b.kind === 'task' ? [n] : []))
+		const boxAt = new Map(tasks.length === theBoxes.length ? tasks.map((n, k) => [n, theBoxes[k]!] as const) : [])
+		const drawn = drawnWith(boxAt, 'body')
+		const isShut = isFolded('sheet-body', false)
+		// #752: ✎ Edit shows the body's raw lines, each a press away from a
+		// field (the field is one line: the body is edited line by line). The
+		// line in the field has + (a line after) and ✕ (delete); Enter saves.
+		const isEditing = opened.isEditing && opened.body !== null && Boolean(Input)
+		const raw = (opened.body ?? '').split('\n')
+		const editButton = Input && !isShut && opened.body !== null && (
+			<Box flexShrink={0}>
+				<Button key="sheet-edit-body" label={opened.isEditing ? '✓ Done editing' : '✎ Edit'} variant={opened.isEditing ? 'primary' : undefined} dimColor={!opened.isEditing}
+					onPress={() => update($, sheet, s => ({ ...s, isEditing: !s.isEditing, editLine: null, lineText: '' }))} />
+			</Box>
+		)
+		const room = Math.max(10, site.bodyColumns - 8)
+		const rawLine = (line: string, n: number) => {
+			if (opened.editLine === n && Input) {
+				return (
+					<Box key={`raw-${n}`} flexDirection="column">
+						<Input key="sheet-line" value={opened.lineText} submitLabel="" autoFocus placeholder={n === 0 ? 'The title' : 'An empty line'}
+							onInput={v => { void update($, sheet, s => ({ ...s, lineText: v })) }}
+							onSubmit={v => { void writeLine($, item.id, n, v) }} />
+						<Box gap={1} justifyContent="flex-end">
+							<Button key="sheet-line-save" label={opened.isSending ? '… Saving' : '↵ Save'} variant="primary" dimColor={opened.isSending} onPress={() => writeLine($, item.id, n, opened.lineText)} />
+							<Button key="sheet-line-add" label="+ line after" dimColor onPress={() => writeLine($, item.id, n, '', true)} />
+							{n > 0 && <Button key="sheet-line-delete" label="✕ delete line" dimColor onPress={() => writeLine($, item.id, n, null)} />}
+							<Button key="sheet-line-cancel" label="Cancel" dimColor onPress={() => update($, sheet, s => ({ ...s, editLine: null, lineText: '' }))} />
+						</Box>
+					</Box>
+				)
+			}
+			const shownText = line.length > room ? `${line.slice(0, room - 1)}…` : line
+			return (
+				<Button key={`sheet-line-${n}`} label={shownText || '·'} plain bold={n === 0} dimColor={!line}
+					onPress={() => update($, sheet, s => ({ ...s, editLine: n, lineText: line }))} />
+			)
+		}
+		// #748: the activity, as on the site: newest first, the opening last;
+		// a comment with its markdown, an event in a line, a resolution with its
+		// note. The band shows the first ENTRIES (a comment cut to a few lines)
+		// unless ▾ all.
+		const feed = opened.feed ?? []
+		const isFeedShut = isFolded('sheet-activity', false)
+		const isWhole = site.isPane || opened.isAll
+		const seen = isWhole ? feed : feed.slice(0, ENTRIES)
+		const centred = (line: string) => {
+			const side = Math.max(2, Math.floor((rule.length - [...line].length - 2) / 2))
+			return `${'─'.repeat(side)} ${line} ${'─'.repeat(side)}`
+		}
+		const agoOf = (at: number) => (ticked && at ? `${elapsed(ticked - at)} ago`.replace('just now ago', 'just now') : '')
+		const entryView = (c: Entry) => {
+			if (c.kind !== 'comment') {
+				const said = c.body ? blocks(c.body) : []
+				const cut = isWhole ? said : said.slice(0, COMMENT_LINES)
+				return (
+					<Box key={`e-${c.key}`} flexDirection="column">
+						{/* Centred between two rules, as the site's separator: the rules
+						    cut to the sheet's width (the section's rule), the line kept. */}
+						<Text dimColor wrap="truncate-end">{centred([c.author, c.event, agoOf(c.at)].filter(Boolean).join(' · '))}</Text>
+						{c.body && (
+							<Box flexDirection="column" paddingLeft={2}>
+								<Text color={c.isWontfix ? 'error' : 'success'}>{c.isWontfix ? "✕ Won't fix" : '✓ Resolution'}</Text>
+								{cut.map(drawnWith(new Map(), `n${c.key}`))}
+								{cut.length < said.length && <Text dimColor>…</Text>}
+							</Box>
+						)}
+					</Box>
+				)
+			}
+			const said = blocks(c.body ?? '')
+			const cut = isWhole ? said : said.slice(0, COMMENT_LINES)
+			const by = `${c.author} · ${agoOf(c.at)} · c${c.seq}${c.isEdited ? ' · edited' : ''}`
+			return (
+				<Box key={`c-${c.seq}`} flexDirection="column">
+					<Box justifyContent="space-between" gap={1}>
+						<Text dimColor={opened.editing !== c.seq} color={opened.editing === c.seq ? brand : undefined} bold={opened.editing === c.seq} wrap="truncate-end">{by}</Text>
+						{c.canEdit && (
+							<Box gap={1} flexShrink={0}>
+								<Button key={`sheet-edit-${c.seq}`} label={glyph('✎')} plain dimColor onPress={() => editComment($, item, c)} />
+								<Button key={`sheet-delete-${c.seq}`} label={glyph('✕')} plain dimColor onPress={() => update($, sheet, s => ({ ...s, deleting: c.seq }))} />
+							</Box>
+						)}
+					</Box>
+					<Box flexDirection="column" paddingLeft={2}>
+						{cut.map(drawnWith(new Map(), `c${c.seq}`))}
+						{cut.length < said.length && <Text dimColor>…</Text>}
+					</Box>
+					{opened.deleting === c.seq && (
+						<Box gap={1} justifyContent="flex-end">
+							<Text color="warning">{`Delete c${c.seq}?`}</Text>
+							<Button key="sheet-delete-confirm" label="✕ Delete" variant="primary" onPress={() => deleteComment($, item.id, c.seq!)} />
+							<Button key="sheet-delete-cancel" label="Cancel" dimColor onPress={() => update($, sheet, s => ({ ...s, deleting: null }))} />
+						</Box>
+					)}
+				</Box>
+			)
+		}
+		const editing = opened.editing
+		const posting = opened.isPosting
+		// The comment field, behind ＋ Comment as on the site (✎ opens it too).
+		const composeButton = Input && !opened.isComposing && (
+			<Box flexShrink={0}><Button key="sheet-compose" label="+ Comment" variant="primary" onPress={() => update($, sheet, s => ({ ...s, isComposing: true, editing: null, reply: '' }))} /></Box>
+		)
+		const replyView = Input && opened.isComposing && (
+			<Box flexDirection="column">
+				<Input key="sheet-comment" value={opened.reply} submitLabel="" autoFocus
+					placeholder={editing === null ? 'Comment…' : `Fix c${editing}…`}
+					onInput={v => { void update($, sheet, s => ({ ...s, reply: v })) }}
+					onSubmit={v => { void sendComment($, item.id, v) }} />
+				<Box gap={1} justifyContent="flex-end">
+					<Button key="sheet-reply-cancel" label="Cancel" dimColor onPress={() => update($, sheet, s => ({ ...s, isComposing: false, editing: null, reply: '' }))} />
+					<Button key="sheet-send" label={posting ? '… Saving' : editing === null ? '↵ Comment' : '↵ Save'} variant="primary" dimColor={posting || !opened.reply.trim()} onPress={() => sendComment($, item.id, opened.reply)} />
+				</Box>
+			</Box>
+		)
+		// Rows the activity takes in the band (head, each entry's lines, the
+		// toggle, the field), so the description leaves it room.
+		const entryRows = (c: Entry) => 1 + (c.body ? Math.min(COMMENT_LINES + 1, blocks(c.body).length) + (c.kind === 'comment' ? 0 : 1) : 0)
+		const threadRows = isFeedShut ? 2 : 3 + seen.reduce((n, c) => n + entryRows(c), 0) + (feed.length > seen.length ? 1 : 0) + (opened.isComposing ? 2 : 0)
+		// The band: its rows, less the sheet's own lines (frame, top, two
+		// sections, facts, type, status), the step's field and the comments.
+		const fits = site.isPane ? lines.length : Math.max(2, site.maxRows - (isFolded('sheet-details', false) ? 9 : 20) - (step ? 3 : 0) - (opened.isTagging || opened.isSnoozing ? 1 : 0) - (opened.picking ? 2 : 0) - threadRows)
+		const shown = lines.length > fits ? lines.slice(0, fits - 1) : lines
+		// Editing in the band: a window of raw lines around the one in the field.
+		const rawFits = site.isPane ? raw.length : Math.max(2, fits - 2)
+		const rawFrom = raw.length <= rawFits ? 0 : Math.min(raw.length - rawFits, Math.max(0, (opened.editLine ?? 0) - Math.floor(rawFits / 2)))
+		const rawShown = raw.slice(rawFrom, rawFrom + rawFits)
+		// #747: the details and what changes the ticket, then its description,
+		// each under a rule, as the list's sections; the description folds.
+		return (
+			<Box flexDirection="column" {...frame}>
+				{top}
+				{sectionHead('sheet-details', 'Details', null, brand, true, false)}
+				{/* (Folds as the other sections: open by default.) */}
+				{!isFolded('sheet-details', false) && <Text> </Text>}
+				{!isFolded('sheet-details', false) && (
+					<Box flexDirection="column">
+						{metaOf({ ...item, tags: [] })}
+						<Box flexDirection="column" marginTop={1}>
+							{typeLine}
+							{statusLine}
+							{tagLine}
+							{tagField}
+							{metaLine('assignee', 'Assignee', opened.assignee, 'assign')}
+							{metaLine('project', 'Project', opened.project ?? config?.project ?? null, 'move')}
+							{sleepLine}
+							{whenField}
+						</Box>
+						{deleteLine}
+					</Box>
+				)}
+				{stepView}
+				{sectionHead('sheet-body', 'Description', null, brand, true, false, editButton)}
+				{/* (A blank line under an open section's head.) */}
+				{!isShut && <Text> </Text>}
+				{!isShut && isEditing && (
+					<Box flexDirection="column">
+						{rawFrom > 0 && <Text dimColor>{`… ${rawFrom} line${rawFrom === 1 ? '' : 's'} above`}</Text>}
+						{rawShown.map((line, k) => rawLine(line, rawFrom + k))}
+						{rawFrom + rawShown.length < raw.length && <Text dimColor>{`… ${raw.length - rawFrom - rawShown.length} more below`}</Text>}
+						<Text dimColor wrap="wrap">Press a line to edit it · the first line is the title · ↗ Open for a full rewrite</Text>
+					</Box>
+				)}
+				{!isShut && !isEditing && (opened.body === null
+					? <Text dimColor>…</Text>
+					: lines.length === 0
+						? <Text dimColor>No description.</Text>
+						: (
+							<Box flexDirection="column">
+								{shown.map(drawn)}
+								{shown.length < lines.length && <Text dimColor>{`+${lines.length - shown.length} more lines · ↗ Open for all`}</Text>}
+							</Box>
+						))}
+				{sectionHead('sheet-activity', 'Activity', null, brand, true, false, !isFeedShut && composeButton)}
+				{!isFeedShut && <Text> </Text>}
+				{!isFeedShut && (
+					<Box flexDirection="column" gap={site.isPane ? 1 : 0}>
+						{replyView}
+						{opened.feed === null && <Text dimColor>…</Text>}
+						{seen.map(entryView)}
+						{!site.isPane && feed.length > ENTRIES && (
+							<Button key="sheet-all" label={opened.isAll ? '▴ latest only' : `▾ all (${feed.length})`} plain dimColor onPress={() => update($, sheet, s => ({ ...s, isAll: !s.isAll }))} />
+						)}
+					</Box>
+				)}
+			</Box>
+		)
+	}
+
+	const watchedNow = await read($, blocked)
 	// One todo's row (its checklist under it when ours); `of` is its section,
 	// for the arrows. In the pane, `under` (why it is blocked) follows the facts.
 	const rowOf = (item: Item, i: number, of: Item[], under: RenderChildren[] = []) => {
@@ -926,6 +1854,8 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 							{closeButton(item.id, narrow)}
 						</Box>
 					)}
+					{/* #747: the ticket's sheet (type, status): [⋮], the brackets clickable too. */}
+					<Button key={`more-${item.id}`} label={glyph('⋮')} plain dimColor onPress={() => openSheet($, item.id)} />
 				</Box>
 		)
 		const title = <Text wrap={site.isPane && item.id === mine ? 'wrap' : 'truncate-end'} bold={isCurrent} dimColor={isBlocked && !hasReply}>{item.title}</Text>
@@ -998,7 +1928,10 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 							<Box flexDirection="column" gap={1}>
 								{of.map(item => (
 									<Box key={`other-${item.id}`} flexDirection="column">
-										<Box>{idOf(item, brand)}</Box>
+										<Box justifyContent="space-between" gap={2}>
+											<Box flexShrink={0}>{idOf(item, brand)}</Box>
+											<Button key={`more-${item.id}`} label={glyph('⋮')} plain dimColor onPress={() => openSheet($, item.id)} />
+										</Box>
 										<Text wrap="truncate-end">{item.title}</Text>
 										{metaOf(item)}
 									</Box>
@@ -1008,6 +1941,28 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 					</Box>
 				)
 			})}
+			{/* #750: the sleeping ones, folded: their wake-up, ☀ to wake one now. */}
+			{site.isPane && asleep.length > 0 && (
+				<Box key="list-sleeping" flexDirection="column">
+					{sectionHead('sleeping', '💤 Sleeping', asleep.length, brand, true)}
+					{!isFolded('sleeping') && (
+						<Box flexDirection="column" gap={1}>
+							{asleep.map(item => (
+								<Box key={`sleeper-${item.id}`} flexDirection="column">
+									<Box justifyContent="space-between" gap={2}>
+										<Box flexShrink={0} gap={1}>{idOf(item, brand)}<Text dimColor>{`until ${wakeLabel(item.until ?? 0, ticked ?? 0)}`}</Text></Box>
+										<Box flexShrink={0} gap={1}>
+											<Button key={`wake-${item.id}`} label="☀ wake" dimColor onPress={() => snooze($, item, null)} />
+											<Button key={`more-${item.id}`} label={glyph('⋮')} plain dimColor onPress={() => openSheet($, item.id)} />
+										</Box>
+									</Box>
+									<Text wrap="truncate-end">{item.title}</Text>
+								</Box>
+							))}
+						</Box>
+					)}
+				</Box>
+			)}
 		</Box>
 	)
 }

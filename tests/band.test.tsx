@@ -269,6 +269,32 @@ test('✎ New: the band turns into a field; Enter creates the ticket, Cancel lea
   expect(await ui.find({ key: 'refresh' })).toBeDefined()
 })
 
+test('#751: New takes a type, tags and a place; the text\'s !type wins', async ($, on) => {
+  const { posts, toasts } = repo(on, () => ITEMS)
+  await $.session.start({ cwd: '/repo/sub', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'floatee', surface: 'terminal', component: 'AbovePrompt', props: { ...PROPS, maxRows: 24 } })
+  await ui.press({ key: 'fold' })
+  await ui.press({ key: 'new' })
+  await ui.press({ key: 'new-type-note' })
+  await ui.press({ key: 'new-tag-add' })
+  await ui.input({ key: 'new-tag', text: '+ui, Bug', kind: 'submit' })
+  await ui.press({ key: 'new-position-bottom' })
+  await ui.input({ key: 'new-ticket', text: 'Dark mode +theme', kind: 'change' })
+  // The text's tag shows with the form's; its ✕ takes it out of the text.
+  expect(await ui.find({ key: 'new-tag-theme' })).toBeDefined()
+  await ui.press({ key: 'new-tag-ui' })
+  await ui.press({ key: 'new-create' })
+  expect(posts).toEqual([{ body_md: 'Dark mode', type: 'note', tags: ['bug', 'theme'], position: 'bottom' }])
+
+  // A !type typed wins: the buttons say so.
+  await ui.press({ key: 'new' })
+  await ui.input({ key: 'new-ticket', text: 'Try it !idea', kind: 'change' })
+  await ui.press({ key: 'new-type-todo' })
+  expect(toasts).toContain('The text says !idea: take it out to choose here')
+  await ui.press({ key: 'new-tag-add' })
+  expect(await ui.find({ key: 'new-tag' })).toBeDefined()
+})
+
 test('parseTicket: title + body, tokens taken out, nothing when only tokens', () => {
   expect(parseTicket('Title +a +a +B !note\n\n- [ ] box')).toEqual({ body: 'Title\n\n- [ ] box', type: 'note', tags: ['a', 'b'] })
   expect(parseTicket('C++ and a+b stay')).toEqual({ body: 'C++ and a+b stay', type: 'todo', tags: [] })
