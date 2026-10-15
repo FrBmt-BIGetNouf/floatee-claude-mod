@@ -49,6 +49,8 @@ declare module 'claude-code' {
       isMine: boolean
       /** #669: when a rate-limit pause (429) ends, in ms; 0 when none. */
       pausedUntil: number
+      /** #751: engine dialogs up (AskUserQuestion, a plan to approve), which hold the keys; 0 when none. */
+      asked: number
       /** #679: the open ideas and notes, for the pane's sections. */
       others: Item[]
       /** #750: the open items asleep (snoozed), apart from the list; the pane lists them. */

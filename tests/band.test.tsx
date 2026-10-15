@@ -295,6 +295,23 @@ test('#751: New takes a type, tags and a place; the text\'s !type wins', async (
   expect(await ui.find({ key: 'new-tag' })).toBeDefined()
 })
 
+test('#751: under an AskUserQuestion, New says to answer it first; the field comes back after', async ($, on) => {
+  repo(on, () => ITEMS)
+  let answer = () => {}
+  on('tool.call', () => new Promise(done => { answer = () => done({ result: { answers: {} } } as never) }) as never)
+  await $.session.start({ cwd: '/repo/sub', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'floatee', surface: 'terminal', component: 'AbovePrompt', props: { ...PROPS, maxRows: 24 } })
+  await ui.press({ key: 'fold' })
+  await ui.press({ key: 'new' })
+  const asking = $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
+  await new Promise(r => setTimeout(r, 10))
+  expect(await ui.find({ key: 'new-ticket' })).toBeUndefined()
+  expect((await ui.findAll({})).map(el => el.text).join('\n')).toContain("Answer Claude's question first")
+  answer()
+  await asking
+  expect(await ui.find({ key: 'new-ticket' })).toBeDefined()
+})
+
 test('parseTicket: title + body, tokens taken out, nothing when only tokens', () => {
   expect(parseTicket('Title +a +a +B !note\n\n- [ ] box')).toEqual({ body: 'Title\n\n- [ ] box', type: 'note', tags: ['a', 'b'] })
   expect(parseTicket('C++ and a+b stay')).toEqual({ body: 'C++ and a+b stay', type: 'todo', tags: [] })

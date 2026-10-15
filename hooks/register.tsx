@@ -85,6 +85,10 @@ const detail = atom({ plugin: 'floatee', key: 'detail' } as const, null)
 // and the end of a rate-limit pause (429), 0 when none.
 const isMine = atom({ plugin: 'floatee', key: 'isMine' } as const, false)
 const pausedUntil = atom({ plugin: 'floatee', key: 'pausedUntil' } as const, 0)
+// #751: a dialog of the engine's is up (AskUserQuestion, a plan to approve): it holds
+// the keys, so a field of ours would take no click and no typing meanwhile.
+const asked = atom({ plugin: 'floatee', key: 'asked' } as const, 0)
+const DIALOG_TOOLS = ['AskUserQuestion', 'ExitPlanMode']
 
 // Inert launchers. The theme's `inactive` draws close to plain text on some
 // terminals; a fixed mid grey reads as disabled on dark and light alike.
@@ -1036,6 +1040,11 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 	// it: the surface tells.)
 	const hasFields = e.surface !== 'mobile'
 	const Input = hasFields && 'Input' in elements ? elements.Input : null
+	// #751: under a dialog, a field says why it takes nothing, instead of staying deaf.
+	const isAsked = await read($, asked) > 0
+	const field = (input: unknown) => (isAsked
+		? <Text color="yellow" wrap="wrap">⏸ Answer Claude's question first: this field takes typing again once it's closed.</Text>
+		: input)
 	const typed = await read($, draft)
 	// (Over SHEET_OFF: a sheet a previous version left in the state lacks the fields since.)
 	const opened = { ...SHEET_OFF, ...await read($, sheet) }
@@ -1247,9 +1256,9 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 						<Box gap={1}>
 							{newLabel('')}
 							<Box flexGrow={1}>
-								<Input key="new-tag" value={typed.tagText ?? ''} submitLabel="" autoFocus placeholder="tags, comma or space between"
+								{field(<Input key="new-tag" value={typed.tagText ?? ''} submitLabel="" autoFocus placeholder="tags, comma or space between"
 									onInput={v => { void update($, draft, d => ({ ...d, tagText: v })) }}
-									onSubmit={v => { void update($, draft, d => ({ ...d, isTagging: false, tagText: '', tags: [...new Set([...(d.tags ?? []), ...v.split(/[\s,]+/).map(x => x.replace(/^\+/, '').trim().toLowerCase()).filter(Boolean)])] })) }} />
+									onSubmit={v => { void update($, draft, d => ({ ...d, isTagging: false, tagText: '', tags: [...new Set([...(d.tags ?? []), ...v.split(/[\s,]+/).map(x => x.replace(/^\+/, '').trim().toLowerCase()).filter(Boolean)])] })) }} />)}
 							</Box>
 							<Button key="new-tag-cancel" label="Cancel" dimColor onPress={() => update($, draft, d => ({ ...d, isTagging: false, tagText: '' }))} />
 						</Box>
@@ -1282,22 +1291,22 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 						<Box gap={1}>
 							{newLabel('')}
 							<Box flexGrow={1}>
-								<Input key="new-when" value={typed.whenText ?? ''} submitLabel="" autoFocus placeholder="2026-11-03, 2026-11-03T09:00, 2w…"
+								{field(<Input key="new-when" value={typed.whenText ?? ''} submitLabel="" autoFocus placeholder="2026-11-03, 2026-11-03T09:00, 2w…"
 									onInput={v => { void update($, draft, d => ({ ...d, whenText: v })) }}
 									onSubmit={v => {
 										const epoch = wakeAt(v, nowMs)
 										if (typeof epoch !== 'number') { $.ui.toast(epoch.error); return }
 										void update($, draft, d => ({ ...d, snooze: epoch, isSnoozing: false, whenText: '' }))
-									}} />
+									}} />)}
 							</Box>
 							<Button key="new-when-cancel" label="Cancel" dimColor onPress={() => update($, draft, d => ({ ...d, isSnoozing: false, whenText: '' }))} />
 						</Box>
 					)}
 				</Box>}
 				{newHead('Content')}
-				<Input key="new-ticket" value={text} placeholder="Click here, then type the title…" submitLabel="" {...(typed.isTagging ? {} : { autoFocus: true as const })}
+				{field(<Input key="new-ticket" value={text} placeholder="Click here, then type the title…" submitLabel="" {...(typed.isTagging ? {} : { autoFocus: true as const })}
 					onInput={v => { void update($, draft, d => ({ ...d, text: v })) }}
-					onSubmit={v => { void createTicket($, v) }} />
+					onSubmit={v => { void createTicket($, v) }} />)}
 				{isRoomy && <Text> </Text>}
 				<Text color="gray" wrap="wrap">First line = title · Alt+Enter: new line · +tag · !idea !note · Enter: create</Text>
 			</Box>
@@ -1465,9 +1474,9 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 			<Box gap={1}>
 				{label('')}
 				<Box flexGrow={1}>
-					<Input key="sheet-tag" value={opened.tagText} submitLabel="" autoFocus placeholder="tags, comma or space between"
+					{field(<Input key="sheet-tag" value={opened.tagText} submitLabel="" autoFocus placeholder="tags, comma or space between"
 						onInput={v => { void update($, sheet, s => ({ ...s, tagText: v })) }}
-						onSubmit={v => { void addTags($, item, v) }} />
+						onSubmit={v => { void addTags($, item, v) }} />)}
 				</Box>
 				<Button key="sheet-tag-cancel" label="Cancel" dimColor onPress={() => update($, sheet, s => ({ ...s, isTagging: false, tagText: '' }))} />
 			</Box>
@@ -1516,9 +1525,9 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 			<Box gap={1}>
 				{label('')}
 				<Box flexGrow={1}>
-					<Input key="sheet-when" value={opened.whenText} submitLabel="" autoFocus placeholder="2026-11-03, 2026-11-03T09:00, 2w…"
+					{field(<Input key="sheet-when" value={opened.whenText} submitLabel="" autoFocus placeholder="2026-11-03, 2026-11-03T09:00, 2w…"
 						onInput={v => { void update($, sheet, s => ({ ...s, whenText: v })) }}
-						onSubmit={v => { void snoozeTyped($, item, v) }} />
+						onSubmit={v => { void snoozeTyped($, item, v) }} />)}
 				</Box>
 				<Button key="sheet-when-cancel" label="Cancel" dimColor onPress={() => update($, sheet, s => ({ ...s, isSnoozing: false, whenText: '' }))} />
 			</Box>
@@ -1555,10 +1564,10 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 		// The step's field and confirms: Enter does the first one.
 		const stepView = Input && step && (
 			<Box flexDirection="column" marginTop={1}>
-				<Input key="sheet-note" value={opened.text} submitLabel="" autoFocus
+				{field(<Input key="sheet-note" value={opened.text} submitLabel="" autoFocus
 					placeholder={step === 'blocked' ? 'Why is it blocked? (required)' : 'Resolution note (optional)'}
 					onInput={v => { void update($, sheet, s => ({ ...s, text: v })) }}
-					onSubmit={v => { void confirmStatus($, item, step, v) }} />
+					onSubmit={v => { void confirmStatus($, item, step, v) }} />)}
 				<Box gap={1} justifyContent="flex-end">
 					{step === 'blocked' && <Button key="sheet-confirm" label={sending ? '… Saving' : '⊝ Block'} variant="primary" dimColor={sending} onPress={() => confirmStatus($, item, 'blocked', opened.text)} />}
 					{step === 'done' && <Button key="sheet-confirm" label={sending ? '… Saving' : '✓ Done'} variant="primary" dimColor={sending} onPress={() => confirmStatus($, item, 'done', opened.text)} />}
@@ -1635,9 +1644,9 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 			if (opened.editLine === n && Input) {
 				return (
 					<Box key={`raw-${n}`} flexDirection="column">
-						<Input key="sheet-line" value={opened.lineText} submitLabel="" autoFocus placeholder={n === 0 ? 'The title' : 'An empty line'}
+						{field(<Input key="sheet-line" value={opened.lineText} submitLabel="" autoFocus placeholder={n === 0 ? 'The title' : 'An empty line'}
 							onInput={v => { void update($, sheet, s => ({ ...s, lineText: v })) }}
-							onSubmit={v => { void writeLine($, item.id, n, v) }} />
+							onSubmit={v => { void writeLine($, item.id, n, v) }} />)}
 						<Box gap={1} justifyContent="flex-end">
 							<Button key="sheet-line-save" label={opened.isSending ? '… Saving' : '↵ Save'} variant="primary" dimColor={opened.isSending} onPress={() => writeLine($, item.id, n, opened.lineText)} />
 							<Button key="sheet-line-add" label="+ line after" dimColor onPress={() => writeLine($, item.id, n, '', true)} />
@@ -1721,10 +1730,10 @@ async function draw($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 		)
 		const replyView = Input && opened.isComposing && (
 			<Box flexDirection="column">
-				<Input key="sheet-comment" value={opened.reply} submitLabel="" autoFocus
+				{field(<Input key="sheet-comment" value={opened.reply} submitLabel="" autoFocus
 					placeholder={editing === null ? 'Comment…' : `Fix c${editing}…`}
 					onInput={v => { void update($, sheet, s => ({ ...s, reply: v })) }}
-					onSubmit={v => { void sendComment($, item.id, v) }} />
+					onSubmit={v => { void sendComment($, item.id, v) }} />)}
 				<Box gap={1} justifyContent="flex-end">
 					<Button key="sheet-reply-cancel" label="Cancel" dimColor onPress={() => update($, sheet, s => ({ ...s, isComposing: false, editing: null, reply: '' }))} />
 					<Button key="sheet-send" label={posting ? '… Saving' : editing === null ? '↵ Comment' : '↵ Save'} variant="primary" dimColor={posting || !opened.reply.trim()} onPress={() => sendComment($, item.id, opened.reply)} />
@@ -1974,6 +1983,7 @@ export const register: Register = on => {
 		// (A turn.start seen by the previous load may never have met its
 		// turn.complete, which left the band thinking Claude still worked.)
 		await update($, isBusy, () => false)
+		await update($, asked, () => 0)
 		await update($, turnId, () => null)
 		await update($, launched, () => null)
 		config = await findConfig($)
@@ -2022,6 +2032,7 @@ export const register: Register = on => {
 		// A subagent's turn ends inside the main one: nothing to do.
 		if ((e as { agentId?: string }).agentId) return next(e)
 		await update($, isBusy, () => false)
+		await update($, asked, () => 0)
 		await update($, turnId, () => null)
 		await update($, launched, () => null)
 		// The end of a watcher's run: counted, maybe stopped (F9).
@@ -2071,7 +2082,10 @@ export const register: Register = on => {
 		})
 		if (no) return { deny: `floatee: ${no}` }
 
-		const ran = await next(e)
+		const isDialog = DIALOG_TOOLS.includes(e.tool)
+		if (isDialog) await update($, asked, n => n + 1)
+		let ran: Awaited<ReturnType<typeof next>>
+		try { ran = await next(e) } finally { if (isDialog) await update($, asked, n => Math.max(0, n - 1)) }
 		if (ran.deny !== undefined) return ran
 		if (command && !ran.isError) await track($, command, ran.text ?? '')
 
